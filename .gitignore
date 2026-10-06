@@ -1,0 +1,24 @@
+# build output
+build/
+build-*/
+bench/build/
+# measurements, logs, generated test data (large, machine-specific)
+bench/out/
+bench/*.log
+bench/*.log.err
+profiles/
+refs/
+*.nsys-rep
+*.sqlite
+*.ncu-rep
+arranque-q27.log*
+# model files (download separately, see README.md)
+models/
+*.gguf
+# Python
+.venv/
+__pycache__/
+*.pyc
+# local work notes (not part of the published repo)
+HANDOFF.md
+initial-prompt.md

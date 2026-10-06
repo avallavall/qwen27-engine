@@ -1,0 +1,59 @@
+== metadata ==
+GGUF.version: [3]
+GGUF.tensor_count: [334]
+GGUF.kv_count: [35]
+general.architecture: clip
+general.name: Qwen3.8-27B mmproj
+general.basename: Qwen3.8-27B
+general.repo_url: https://huggingface.co/ISTA-DASLab
+general.description: Vision encoder + projector (mmproj) for Qwen3.8-27B, converted from the base checkpoint by ISTA DASLab (Deep Algorithms and Systems Lab)
+general.base_model.count: [1]
+general.base_model.0.name: Qwen3.8 27B
+general.base_model.0.organization: Qwen
+general.base_model.0.repo_url: https://huggingface.co/Qwen/Qwen3.8-27B
+general.type: mmproj
+general.sampling.top_k: [20]
+general.sampling.top_p: [0.949999988079071]
+general.sampling.min_p: [0.0]
+general.sampling.temp: [1.0]
+general.sampling.penalty_repeat: [1.0]
+general.size_label: 461M
+general.license: apache-2.0
+general.tags: [[105, 109, 97, 103, 101, 45, 116, 101, 120, 116, 45, 116, 111, 45, 116, 101, 120, 116], [105, 115, 116, 97, 45, 100, 97, 115, 108, 97, 98]]
+general.file_type: [32]
+clip.has_vision_encoder: [True]
+clip.vision.projection_dim: [5120]
+clip.vision.image_size: [768]
+clip.vision.patch_size: [16]
+clip.vision.embedding_length: [1152]
+clip.vision.feed_forward_length: [4304]
+clip.vision.block_count: [27]
+clip.vision.attention.head_count: [16]
+clip.vision.image_mean: [[0.5], [0.5], [0.5]]
+clip.vision.image_std: [[0.5], [0.5], [0.5]]
+clip.projector_type: qwen3vl_merger
+clip.use_gelu: [True]
+clip.vision.spatial_merge_size: [2]
+clip.vision.attention.layer_norm_epsilon: [9.999999974752427e-07]
+clip.vision.is_deepstack_layers: [[False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False], [False]]
+general.quantization_version: [2]
+== tensors ==
+type BF16: 869.6 MiB
+type F32: 18.4 MiB
+total 888.0 MiB, n_tensors 334
+v.blk.0.attn_out.bias                         F32    [1152] 0.00 MiB
+v.blk.0.attn_out.weight                       BF16   [1152, 1152] 2.53 MiB
+v.blk.0.attn_qkv.bias                         F32    [3456] 0.01 MiB
+v.blk.0.attn_qkv.weight                       BF16   [1152, 3456] 7.59 MiB
+v.blk.0.ffn_up.bias                           F32    [4304] 0.02 MiB
+v.blk.0.ffn_up.weight                         BF16   [1152, 4304] 9.46 MiB
+v.blk.0.ffn_down.bias                         F32    [1152] 0.00 MiB
+v.blk.0.ffn_down.weight                       BF16   [4304, 1152] 9.46 MiB
+v.blk.0.ln1.bias                              F32    [1152] 0.00 MiB
+v.blk.0.ln1.weight                            F32    [1152] 0.00 MiB
+v.blk.0.ln2.bias                              F32    [1152] 0.00 MiB
+v.blk.0.ln2.weight                            F32    [1152] 0.00 MiB
+mm.0.bias                                     F32    [4608] 0.02 MiB
+mm.0.weight                                   BF16   [4608, 4608] 40.50 MiB
+mm.2.bias                                     F32    [5120] 0.02 MiB
+mm.2.weight                                   BF16   [4608, 5120] 45.00 MiB

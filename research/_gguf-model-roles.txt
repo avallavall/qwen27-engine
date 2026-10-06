@@ -1,0 +1,46 @@
+layer kinds: Counter({'gdn': 48, 'attn': 16})
+attn layers: [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 51, 55, 59, 63]
+gdn:ffn_down.weight                         1862.7 MiB  {'IQ2_S': 3, 'IQ3_S': 16, 'IQ3_XXS': 7, 'IQ4_XS': 15, 'Q2_K': 1, 'IQ2_XS': 1, 'Q4_K': 5}
+gdn:ffn_up.weight                           1712.0 MiB  {'IQ2_XXS': 2, 'IQ3_S': 18, 'IQ3_XXS': 12, 'IQ2_S': 5, 'IQ2_XS': 1, 'IQ4_XS': 7, 'Q4_K': 3}
+gdn:ffn_gate.weight                         1694.7 MiB  {'IQ2_XS': 3, 'IQ3_XXS': 15, 'IQ3_S': 12, 'IQ2_S': 3, 'IQ1_M': 1, 'IQ2_XXS': 1, 'Q2_K': 1, 'Q4_K': 1, 'IQ4_XS': 11}
+gdn:attn_qkv.weight                         1032.4 MiB  {'IQ4_XS': 9, 'IQ3_S': 22, 'IQ3_XXS': 13, 'IQ2_XS': 1, 'Q2_K': 1, 'Q4_K': 1, 'IQ2_XXS': 1}
+gdn:ssm_out.weight                           685.8 MiB  {'IQ4_XS': 16, 'Q4_K': 6, 'IQ3_S': 22, 'IQ3_XXS': 4}
+output.weight                                682.0 MiB  {'Q4_K': 1}
+gdn:attn_gate.weight                         635.9 MiB  {'IQ4_XS': 12, 'IQ3_XXS': 9, 'IQ3_S': 18, 'Q2_K': 4, 'IQ2_S': 2, 'Q4_K': 3}
+attn:ffn_down.weight                         614.3 MiB  {'IQ3_S': 6, 'IQ2_S': 1, 'IQ2_XS': 2, 'IQ4_XS': 6, 'Q4_K': 1}
+attn:ffn_up.weight                           586.4 MiB  {'IQ3_XXS': 6, 'IQ3_S': 7, 'IQ4_XS': 3}
+attn:ffn_gate.weight                         585.0 MiB  {'IQ3_XXS': 6, 'IQ2_S': 1, 'IQ2_XS': 1, 'IQ3_S': 3, 'IQ4_XS': 4, 'Q4_K': 1}
+token_embd.weight                            388.4 MiB  {'IQ2_S': 1}
+attn:attn_q.weight                           377.3 MiB  {'IQ2_XXS': 1, 'Q2_K': 6, 'IQ3_S': 3, 'IQ4_XS': 2, 'IQ3_XXS': 3, 'Q4_K': 1}
+attn:attn_output.weight                      222.9 MiB  {'IQ3_S': 10, 'IQ3_XXS': 1, 'IQ4_XS': 2, 'Q4_K': 3}
+mtp:ffn_down.weight                           69.7 MiB  {'Q6_K': 1}
+mtp:ffn_gate.weight                           69.7 MiB  {'Q6_K': 1}
+mtp:ffn_up.weight                             69.7 MiB  {'Q6_K': 1}
+mtp:attn_q.weight                             49.2 MiB  {'Q6_K': 1}
+mtp:nextn.eh_proj.weight                      41.0 MiB  {'Q6_K': 1}
+attn:attn_k.weight                            41.0 MiB  {'IQ3_S': 1, 'IQ4_XS': 8, 'IQ2_S': 1, 'Q4_K': 5, 'IQ3_XXS': 1}
+attn:attn_v.weight                            40.0 MiB  {'IQ3_S': 6, 'IQ3_XXS': 1, 'Q4_K': 8, 'IQ4_XS': 1}
+mtp:attn_output.weight                        24.6 MiB  {'Q6_K': 1}
+gdn:ssm_alpha.weight                          22.5 MiB  {'BF16': 48}
+gdn:ssm_beta.weight                           22.5 MiB  {'BF16': 48}
+gdn:ssm_conv1d.weight                          7.5 MiB  {'F32': 48}
+mtp:attn_k.weight                              4.1 MiB  {'Q6_K': 1}
+mtp:attn_v.weight                              4.1 MiB  {'Q6_K': 1}
+gdn:attn_norm.weight                           0.9 MiB  {'F32': 48}
+gdn:post_attention_norm.weight                 0.9 MiB  {'F32': 48}
+attn:attn_norm.weight                          0.3 MiB  {'F32': 16}
+attn:post_attention_norm.weight                0.3 MiB  {'F32': 16}
+gdn:ssm_norm.weight                            0.0 MiB  {'F32': 48}
+output_norm.weight                             0.0 MiB  {'F32': 1}
+mtp:attn_norm.weight                           0.0 MiB  {'F32': 1}
+mtp:post_attention_norm.weight                 0.0 MiB  {'F32': 1}
+mtp:nextn.shared_head_norm.weight              0.0 MiB  {'F32': 1}
+mtp:nextn.enorm.weight                         0.0 MiB  {'F32': 1}
+mtp:nextn.hnorm.weight                         0.0 MiB  {'F32': 1}
+attn:attn_k_norm.weight                        0.0 MiB  {'F32': 16}
+attn:attn_q_norm.weight                        0.0 MiB  {'F32': 16}
+gdn:ssm_a                                      0.0 MiB  {'F32': 48}
+gdn:ssm_dt.bias                                0.0 MiB  {'F32': 48}
+mtp:attn_k_norm.weight                         0.0 MiB  {'F32': 1}
+mtp:attn_q_norm.weight                         0.0 MiB  {'F32': 1}
+total 11548.1 MiB

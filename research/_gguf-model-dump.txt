@@ -1,0 +1,245 @@
+== metadata ==
+GGUF.version: [3]
+GGUF.tensor_count: [866]
+GGUF.kv_count: [53]
+general.architecture: qwen35
+general.name: Qwen3.8-27B GSQ-RCO
+general.basename: Qwen3.8-27B
+general.quantized_by: ISTA DASLab
+general.repo_url: https://huggingface.co/ISTA-DASLab
+general.license: apache-2.0
+general.tags: [[103, 115, 113, 45, 114, 99, 111], [105, 115, 116, 97, 45, 100, 97, 115, 108, 97, 98]]
+general.description: GSQ-RCO non-uniform mixed-precision GGUF (Deep Algorithms and Systems Lab, ISTA)
+general.base_model.count: [1]
+general.base_model.0.name: Qwen3.8 27B
+general.base_model.0.organization: Qwen
+general.base_model.0.repo_url: https://huggingface.co/Qwen/Qwen3.8-27B
+general.type: model
+general.sampling.top_k: [20]
+general.sampling.top_p: [0.949999988079071]
+general.sampling.min_p: [0.0]
+general.sampling.temp: [1.0]
+general.size_label: 27B
+qwen35.block_count: [65]
+qwen35.context_length: [262144]
+qwen35.embedding_length: [5120]
+qwen35.feed_forward_length: [17408]
+qwen35.attention.head_count: [24]
+qwen35.attention.head_count_kv: [4]
+qwen35.rope.dimension_sections: [[11], [11], [10], [0]]
+qwen35.rope.freq_base: [10000000.0]
+qwen35.attention.layer_norm_rms_epsilon: [9.999999974752427e-07]
+qwen35.attention.key_length: [256]
+qwen35.attention.value_length: [256]
+qwen35.ssm.conv_kernel: [4]
+qwen35.ssm.state_size: [128]
+qwen35.ssm.group_count: [16]
+qwen35.ssm.time_step_rank: [48]
+qwen35.ssm.inner_size: [6144]
+qwen35.full_attention_interval: [4]
+qwen35.rope.dimension_count: [64]
+tokenizer.ggml.model: gpt2
+tokenizer.ggml.pre: qwen35
+tokenizer.ggml.tokens: <array len 248320>
+tokenizer.ggml.token_type: <array len 248320>
+tokenizer.ggml.merges: <array len 247587>
+tokenizer.ggml.eos_token_id: <array len 1>
+tokenizer.ggml.padding_token_id: <array len 1>
+tokenizer.ggml.bos_token_id: <array len 1>
+tokenizer.ggml.add_bos_token: <array len 1>
+tokenizer.chat_template: <8952 chars>
+quantize.imatrix.file: imatrix-qwen3.8-27b.gguf
+quantize.imatrix.dataset: calib_qwen3.8-27b.tokids
+quantize.imatrix.entries_count: [496]
+quantize.imatrix.chunks_count: [1000]
+general.file_type: [26]
+general.quantization_version: [2]
+qwen35.nextn_predict_layers: [1]
+== tensors ==
+type IQ3_S: 3474.0 MiB
+type IQ4_XS: 2882.0 MiB
+type IQ3_XXS: 1979.1 MiB
+type Q4_K: 1508.9 MiB
+type IQ2_S: 763.1 MiB
+type Q6_K: 332.2 MiB
+type Q2_K: 229.7 MiB
+type IQ2_XS: 211.0 MiB
+type IQ2_XXS: 94.1 MiB
+type BF16: 45.0 MiB
+type IQ1_M: 18.6 MiB
+type F32: 10.2 MiB
+total 11548.1 MiB, n_tensors 866
+output.weight                                 Q4_K   [5120, 248320] 682.03 MiB
+output_norm.weight                            F32    [5120] 0.02 MiB
+token_embd.weight                             IQ2_S  [5120, 248320] 388.38 MiB
+blk.0.attn_gate.weight                        IQ4_XS [5120, 6144] 15.94 MiB
+blk.0.attn_norm.weight                        F32    [5120] 0.02 MiB
+blk.0.attn_qkv.weight                         IQ4_XS [5120, 10240] 26.56 MiB
+blk.0.ffn_down.weight                         IQ2_S  [17408, 5120] 27.23 MiB
+blk.0.ffn_gate.weight                         IQ2_XS [5120, 17408] 24.57 MiB
+blk.0.ffn_up.weight                           IQ2_XXS [5120, 17408] 21.91 MiB
+blk.0.post_attention_norm.weight              F32    [5120] 0.02 MiB
+blk.0.ssm_a                                   F32    [48] 0.00 MiB
+blk.0.ssm_alpha.weight                        BF16   [5120, 48] 0.47 MiB
+blk.0.ssm_beta.weight                         BF16   [5120, 48] 0.47 MiB
+blk.0.ssm_conv1d.weight                       F32    [4, 10240] 0.16 MiB
+blk.0.ssm_dt.bias                             F32    [48] 0.00 MiB
+blk.0.ssm_norm.weight                         F32    [128] 0.00 MiB
+blk.0.ssm_out.weight                          IQ4_XS [6144, 5120] 15.94 MiB
+blk.3.attn_k.weight                           IQ3_S  [5120, 1024] 2.15 MiB
+blk.3.attn_k_norm.weight                      F32    [256] 0.00 MiB
+blk.3.attn_norm.weight                        F32    [5120] 0.02 MiB
+blk.3.attn_output.weight                      IQ3_S  [6144, 5120] 12.89 MiB
+blk.3.attn_q.weight                           IQ2_XXS [5120, 12288] 15.47 MiB
+blk.3.attn_q_norm.weight                      F32    [256] 0.00 MiB
+blk.3.attn_v.weight                           IQ3_S  [5120, 1024] 2.15 MiB
+blk.3.ffn_down.weight                         IQ3_S  [17408, 5120] 36.52 MiB
+blk.3.ffn_gate.weight                         IQ3_XXS [5120, 17408] 32.54 MiB
+blk.3.ffn_up.weight                           IQ3_XXS [5120, 17408] 32.54 MiB
+blk.3.post_attention_norm.weight              F32    [5120] 0.02 MiB
+blk.30.attn_gate.weight                       IQ3_S  [5120, 6144] 12.89 MiB
+blk.30.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.30.attn_qkv.weight                        IQ3_S  [5120, 10240] 21.48 MiB
+blk.30.ffn_down.weight                        IQ3_S  [17408, 5120] 36.52 MiB
+blk.30.ffn_gate.weight                        IQ3_XXS [5120, 17408] 32.54 MiB
+blk.30.ffn_up.weight                          IQ3_XXS [5120, 17408] 32.54 MiB
+blk.30.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.30.ssm_a                                  F32    [48] 0.00 MiB
+blk.30.ssm_alpha.weight                       BF16   [5120, 48] 0.47 MiB
+blk.30.ssm_beta.weight                        BF16   [5120, 48] 0.47 MiB
+blk.30.ssm_conv1d.weight                      F32    [4, 10240] 0.16 MiB
+blk.30.ssm_dt.bias                            F32    [48] 0.00 MiB
+blk.30.ssm_norm.weight                        F32    [128] 0.00 MiB
+blk.30.ssm_out.weight                         IQ4_XS [6144, 5120] 15.94 MiB
+blk.31.attn_k.weight                          IQ4_XS [5120, 1024] 2.66 MiB
+blk.31.attn_k_norm.weight                     F32    [256] 0.00 MiB
+blk.31.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.31.attn_output.weight                     IQ3_S  [6144, 5120] 12.89 MiB
+blk.31.attn_q.weight                          Q2_K   [5120, 12288] 19.69 MiB
+blk.31.attn_q_norm.weight                     F32    [256] 0.00 MiB
+blk.31.attn_v.weight                          Q4_K   [5120, 1024] 2.81 MiB
+blk.31.ffn_down.weight                        IQ3_S  [17408, 5120] 36.52 MiB
+blk.31.ffn_gate.weight                        IQ3_XXS [5120, 17408] 32.54 MiB
+blk.31.ffn_up.weight                          IQ3_XXS [5120, 17408] 32.54 MiB
+blk.31.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.32.attn_gate.weight                       IQ3_S  [5120, 6144] 12.89 MiB
+blk.32.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.32.attn_qkv.weight                        IQ4_XS [5120, 10240] 26.56 MiB
+blk.32.ffn_down.weight                        IQ3_S  [17408, 5120] 36.52 MiB
+blk.32.ffn_gate.weight                        IQ3_XXS [5120, 17408] 32.54 MiB
+blk.32.ffn_up.weight                          IQ3_XXS [5120, 17408] 32.54 MiB
+blk.32.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.32.ssm_a                                  F32    [48] 0.00 MiB
+blk.32.ssm_alpha.weight                       BF16   [5120, 48] 0.47 MiB
+blk.32.ssm_beta.weight                        BF16   [5120, 48] 0.47 MiB
+blk.32.ssm_conv1d.weight                      F32    [4, 10240] 0.16 MiB
+blk.32.ssm_dt.bias                            F32    [48] 0.00 MiB
+blk.32.ssm_norm.weight                        F32    [128] 0.00 MiB
+blk.32.ssm_out.weight                         IQ4_XS [6144, 5120] 15.94 MiB
+blk.33.attn_gate.weight                       IQ3_S  [5120, 6144] 12.89 MiB
+blk.33.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.33.attn_qkv.weight                        IQ3_S  [5120, 10240] 21.48 MiB
+blk.33.ffn_down.weight                        IQ3_XXS [17408, 5120] 32.54 MiB
+blk.33.ffn_gate.weight                        IQ3_XXS [5120, 17408] 32.54 MiB
+blk.33.ffn_up.weight                          IQ2_S  [5120, 17408] 27.23 MiB
+blk.33.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.33.ssm_a                                  F32    [48] 0.00 MiB
+blk.33.ssm_alpha.weight                       BF16   [5120, 48] 0.47 MiB
+blk.33.ssm_beta.weight                        BF16   [5120, 48] 0.47 MiB
+blk.33.ssm_conv1d.weight                      F32    [4, 10240] 0.16 MiB
+blk.33.ssm_dt.bias                            F32    [48] 0.00 MiB
+blk.33.ssm_norm.weight                        F32    [128] 0.00 MiB
+blk.33.ssm_out.weight                         IQ3_XXS [6144, 5120] 11.48 MiB
+blk.34.attn_gate.weight                       IQ3_XXS [5120, 6144] 11.48 MiB
+blk.34.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.34.attn_qkv.weight                        IQ3_S  [5120, 10240] 21.48 MiB
+blk.34.ffn_down.weight                        IQ3_S  [17408, 5120] 36.52 MiB
+blk.34.ffn_gate.weight                        IQ3_XXS [5120, 17408] 32.54 MiB
+blk.34.ffn_up.weight                          IQ4_XS [5120, 17408] 45.16 MiB
+blk.34.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.34.ssm_a                                  F32    [48] 0.00 MiB
+blk.34.ssm_alpha.weight                       BF16   [5120, 48] 0.47 MiB
+blk.34.ssm_beta.weight                        BF16   [5120, 48] 0.47 MiB
+blk.34.ssm_conv1d.weight                      F32    [4, 10240] 0.16 MiB
+blk.34.ssm_dt.bias                            F32    [48] 0.00 MiB
+blk.34.ssm_norm.weight                        F32    [128] 0.00 MiB
+blk.34.ssm_out.weight                         IQ3_S  [6144, 5120] 12.89 MiB
+blk.35.attn_k.weight                          IQ4_XS [5120, 1024] 2.66 MiB
+blk.35.attn_k_norm.weight                     F32    [256] 0.00 MiB
+blk.35.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.35.attn_output.weight                     IQ4_XS [6144, 5120] 15.94 MiB
+blk.35.attn_q.weight                          IQ3_S  [5120, 12288] 25.78 MiB
+blk.35.attn_q_norm.weight                     F32    [256] 0.00 MiB
+blk.35.attn_v.weight                          Q4_K   [5120, 1024] 2.81 MiB
+blk.35.ffn_down.weight                        IQ4_XS [17408, 5120] 45.16 MiB
+blk.35.ffn_gate.weight                        IQ3_XXS [5120, 17408] 32.54 MiB
+blk.35.ffn_up.weight                          IQ3_S  [5120, 17408] 36.52 MiB
+blk.35.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.36.attn_gate.weight                       IQ3_S  [5120, 6144] 12.89 MiB
+blk.36.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.36.attn_qkv.weight                        IQ4_XS [5120, 10240] 26.56 MiB
+blk.36.ffn_down.weight                        IQ4_XS [17408, 5120] 45.16 MiB
+blk.36.ffn_gate.weight                        IQ3_S  [5120, 17408] 36.52 MiB
+blk.36.ffn_up.weight                          Q4_K   [5120, 17408] 47.81 MiB
+blk.36.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.36.ssm_a                                  F32    [48] 0.00 MiB
+blk.36.ssm_alpha.weight                       BF16   [5120, 48] 0.47 MiB
+blk.36.ssm_beta.weight                        BF16   [5120, 48] 0.47 MiB
+blk.36.ssm_conv1d.weight                      F32    [4, 10240] 0.16 MiB
+blk.36.ssm_dt.bias                            F32    [48] 0.00 MiB
+blk.36.ssm_norm.weight                        F32    [128] 0.00 MiB
+blk.36.ssm_out.weight                         IQ4_XS [6144, 5120] 15.94 MiB
+blk.37.attn_gate.weight                       Q4_K   [5120, 6144] 16.88 MiB
+blk.37.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.37.attn_qkv.weight                        IQ3_S  [5120, 10240] 21.48 MiB
+blk.37.ffn_down.weight                        IQ4_XS [17408, 5120] 45.16 MiB
+blk.37.ffn_gate.weight                        Q4_K   [5120, 17408] 47.81 MiB
+blk.37.ffn_up.weight                          IQ4_XS [5120, 17408] 45.16 MiB
+blk.37.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.37.ssm_a                                  F32    [48] 0.00 MiB
+blk.37.ssm_alpha.weight                       BF16   [5120, 48] 0.47 MiB
+blk.37.ssm_beta.weight                        BF16   [5120, 48] 0.47 MiB
+blk.37.ssm_conv1d.weight                      F32    [4, 10240] 0.16 MiB
+blk.37.ssm_dt.bias                            F32    [48] 0.00 MiB
+blk.37.ssm_norm.weight                        F32    [128] 0.00 MiB
+blk.37.ssm_out.weight                         IQ4_XS [6144, 5120] 15.94 MiB
+blk.38.attn_gate.weight                       IQ3_S  [5120, 6144] 12.89 MiB
+blk.38.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.38.attn_qkv.weight                        IQ4_XS [5120, 10240] 26.56 MiB
+blk.38.ffn_down.weight                        IQ4_XS [17408, 5120] 45.16 MiB
+blk.38.ffn_gate.weight                        IQ3_S  [5120, 17408] 36.52 MiB
+blk.38.ffn_up.weight                          IQ3_XXS [5120, 17408] 32.54 MiB
+blk.38.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.38.ssm_a                                  F32    [48] 0.00 MiB
+blk.38.ssm_alpha.weight                       BF16   [5120, 48] 0.47 MiB
+blk.38.ssm_beta.weight                        BF16   [5120, 48] 0.47 MiB
+blk.38.ssm_conv1d.weight                      F32    [4, 10240] 0.16 MiB
+blk.38.ssm_dt.bias                            F32    [48] 0.00 MiB
+blk.38.ssm_norm.weight                        F32    [128] 0.00 MiB
+blk.38.ssm_out.weight                         IQ3_S  [6144, 5120] 12.89 MiB
+blk.39.attn_k.weight                          IQ4_XS [5120, 1024] 2.66 MiB
+blk.39.attn_k_norm.weight                     F32    [256] 0.00 MiB
+blk.39.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.39.attn_output.weight                     Q4_K   [6144, 5120] 16.88 MiB
+blk.39.attn_q.weight                          IQ3_S  [5120, 12288] 25.78 MiB
+blk.39.attn_q_norm.weight                     F32    [256] 0.00 MiB
+blk.39.attn_v.weight                          IQ4_XS [5120, 1024] 2.66 MiB
+blk.39.ffn_down.weight                        IQ4_XS [17408, 5120] 45.16 MiB
+blk.39.ffn_gate.weight                        IQ4_XS [5120, 17408] 45.16 MiB
+blk.39.ffn_up.weight                          IQ3_S  [5120, 17408] 36.52 MiB
+blk.39.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.64.nextn.eh_proj.weight                   Q6_K   [10240, 5120] 41.02 MiB
+blk.64.ffn_down.weight                        Q6_K   [17408, 5120] 69.73 MiB
+blk.64.ffn_gate.weight                        Q6_K   [5120, 17408] 69.73 MiB
+blk.64.ffn_up.weight                          Q6_K   [5120, 17408] 69.73 MiB
+blk.64.attn_k.weight                          Q6_K   [5120, 1024] 4.10 MiB
+blk.64.attn_output.weight                     Q6_K   [6144, 5120] 24.61 MiB
+blk.64.attn_q.weight                          Q6_K   [5120, 12288] 49.22 MiB
+blk.64.attn_v.weight                          Q6_K   [5120, 1024] 4.10 MiB
+blk.64.attn_norm.weight                       F32    [5120] 0.02 MiB
+blk.64.post_attention_norm.weight             F32    [5120] 0.02 MiB
+blk.64.attn_k_norm.weight                     F32    [256] 0.00 MiB
+blk.64.attn_q_norm.weight                     F32    [256] 0.00 MiB
+blk.64.nextn.shared_head_norm.weight          F32    [5120] 0.02 MiB
+blk.64.nextn.enorm.weight                     F32    [5120] 0.02 MiB
+blk.64.nextn.hnorm.weight                     F32    [5120] 0.02 MiB
