@@ -1,8 +1,11 @@
 # Run one real Qwen Code agent session against the test server (port 8081), headless, in a scratch folder.
 # The user's own Qwen Code config (~\.qwen) is not read or changed: QWEN_HOME points to a scratch home.
-# Usage: .venv\Scripts\python.exe bench\qwen_session.py [--name run1] [--prompt "..."] [--key KEY]
+# Usage: .venv\Scripts\python.exe bench\qwen_session.py --yolo [--name run1] [--prompt "..."] [--key KEY]
 # Output: bench\out\qwen\<name>\ with work\ (the agent's folder), logs\ (one JSON per API request, written by
 # Qwen Code), stream.jsonl (Qwen Code's stream-json output) and a printed summary.
+# WARNING: a headless session cannot answer approval prompts, so Qwen Code runs with --approval-mode yolo: the model
+# can run any shell command and edit any file this user can reach, not only the scratch folder. The script refuses
+# to start without --yolo. Use it only with prompts you trust, on a machine where that is acceptable.
 import argparse, glob, json, os, shutil, subprocess, sys, time
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -20,7 +23,12 @@ ap.add_argument("--key", default=os.environ.get("BENCH_KEY", "local-test"))
 ap.add_argument("--url", default="http://127.0.0.1:8081/v1")
 ap.add_argument("--minutes", type=int, default=45)
 ap.add_argument("--effort", default="", help="low|medium|high|xhigh: turn on Qwen Code's openai-effort profile")
+ap.add_argument("--yolo", action="store_true",
+                help="required: accept that Qwen Code approves every tool call (any command, any file) by itself")
 a = ap.parse_args()
+if not a.yolo:
+    sys.exit("qwen_session.py runs Qwen Code with --approval-mode yolo (the model can run any command and edit any "
+             "file without asking). Add --yolo to accept that.")
 
 T = os.path.join(HERE, "out", "qwen", a.name)
 if os.path.exists(T):

@@ -163,7 +163,7 @@ in the variable named by `envKey`). To let Qwen Code choose the reasoning effort
 | Server, end to end | start the server with a key, then `python bench\test_server.py` (`BENCH_KEY`, `BENCH_URL`) |
 | Image answers | `python bench\vision_answers.py` |
 | Prompts and tool calls vs llama.cpp | `bench\build\llama_chat.exe <server log dir>` (`bench\build-llama-chat.bat`) |
-| Real Qwen Code session | `python bench\qwen_session.py` |
+| Real Qwen Code session | `python bench\qwen_session.py --yolo` (Qwen Code then approves every tool call by itself: any command, any file) |
 | Speed | `build\q27_gen.exe <model> <token file> 0,1 1000,30000,100000,150000 400 depth 2`, `python bench\mide-tps.py`, `python bench\compare.py` |
 
 The Python scripts use a virtual environment with `jinja2`, `numpy`, `pillow` and `gguf`. The comparisons with
