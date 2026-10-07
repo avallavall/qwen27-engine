@@ -120,17 +120,31 @@ __global__ void __launch_bounds__(1024) rmsnorm_q8_kernel(const float* __restric
   norm_q8_row<NPT>(v, w, eps, n, row, h, xq, xd, xs);
 }
 
+__device__ __forceinline__ unsigned long long gtimer() {
+  unsigned long long t;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+  return t;
+}
+
 // x[row] += partial[row] (two cards: the sum of both cards' partials through mapped host memory, BF16 wire
 // as llama.cpp), then the RMSNorm of the new x[row] with weight w -> h (optional) and q8_1. Block per row.
 template <int NPT, int WIRE, int QB = 32>
 __global__ void __launch_bounds__(1024) sum_norm_q8_kernel(float* __restrict__ x, const float* __restrict__ partial, ArArgs ar,
                                                            bool exchange, const float* __restrict__ w, float eps,
                                                            float* __restrict__ h, int8_t* __restrict__ xq,
-                                                           float* __restrict__ xd, int n, const uint8_t* pf, size_t pf_bytes) {
+                                                           float* __restrict__ xd, int n, const uint8_t* pf, size_t pf_bytes,
+                                                           int rows) {
+  // Bring the next GEMV's weights into L2 while the row blocks wait on the link. Blocks rows.. only issue the prefetch
+  // and exit: issuing it inside a row block held that block at its next barrier for about 10 us, which delayed the
+  // flag to the other card (Q27_SUMPROF). rows == gridDim.x: the old placement (Q27_PF_INROW=1).
+  if (blockIdx.x >= rows) {
+    if (threadIdx.x < 32) l2_prefetch_range(pf, pf_bytes, (blockIdx.x - rows) * 32 + threadIdx.x, (gridDim.x - rows) * 32);
+    return;
+  }
   pdl_wait();
   pdl_trigger();
-  // Bring the next GEMV's weights into L2 while this kernel waits on the link.
-  if (pf && threadIdx.x >= 32 && threadIdx.x < 64) l2_prefetch_range(pf, pf_bytes, blockIdx.x * 32 + threadIdx.x - 32, gridDim.x * 32);
+  if (pf && rows == (int)gridDim.x && threadIdx.x >= 32 && threadIdx.x < 64)
+    l2_prefetch_range(pf, pf_bytes, blockIdx.x * 32 + threadIdx.x - 32, gridDim.x * 32);
   const size_t row = blockIdx.x;
   float* xr = x + row * n;
   const float* pr = partial + row * n;
@@ -141,6 +155,9 @@ __global__ void __launch_bounds__(1024) sum_norm_q8_kernel(float* __restrict__ x
     // Row layout on the wire: n int8 values, then n / 32 fp16 scales (n + n / 16 bytes, 16-byte aligned for n = 5120).
     // Both directions go through shared memory so the link sees whole 16-byte loads and stores.
     const int token = (*ar.dstep) * ar.n_ar + ar.index + 1;
+    const bool tp = ar.tprof && blockIdx.x == 0 && threadIdx.x == 0;
+    unsigned long long t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+    if (tp) t0 = gtimer();
     const int rb = n + 2 * n / QB;
     float* efr = ar.ef ? ar.ef + row * n : nullptr;
     __shared__ __align__(16) int8_t sq[5120 + 2 * 5120 / QB];
@@ -166,16 +183,18 @@ __global__ void __launch_bounds__(1024) sum_norm_q8_kernel(float* __restrict__ x
     if (threadIdx.x < rb / 16) mine16[threadIdx.x] = ((const uint4*)sq)[threadIdx.x];
     __threadfence_system();
     __syncthreads();
+    if (tp) t1 = gtimer();
     if (threadIdx.x == 0) {
       volatile int* fm = ar.flag_mine + row * 32;
       volatile const int* fo = ar.flag_other + row * 32;
       *fm = token;
       __threadfence_system();
-      const long long t0 = clock64();
+      const long long c0 = clock64();
       while (*fo != token) {
-        if (clock64() - t0 > 3000000000LL) { atomicAdd(ar.err, 1); break; }  // about 1 s: the peer is gone
+        if (clock64() - c0 > 3000000000LL) { atomicAdd(ar.err, 1); break; }  // about 1 s: the peer is gone
       }
     }
+    if (tp) t2 = gtimer();
     __syncthreads();
     __threadfence_system();
     if (threadIdx.x < rb / 16) {
@@ -184,12 +203,18 @@ __global__ void __launch_bounds__(1024) sum_norm_q8_kernel(float* __restrict__ x
       ((uint4*)sq)[threadIdx.x] = u;
     }
     __syncthreads();
+    if (tp) t3 = gtimer();
 #pragma unroll
     for (int k = 0; k < NPT; k++) {
       const int i = threadIdx.x + k * 1024;
       const float oth = __half2float(ssc[i / QB]) * (float)sq[i];
       v[k] = xr[i] + (own[k] + oth);
       xr[i] = v[k];
+    }
+    if (tp) {
+      unsigned long long* a = ar.tprof + (size_t)ar.index * 8;
+      atomicAdd(a + 0, t1 - t0); atomicAdd(a + 1, t2 - t1); atomicAdd(a + 2, t3 - t2);
+      atomicAdd(a + 4, 1ull); atomicAdd(a + 5, gtimer() - t0);  // total up to here (the norm follows)
     }
   } else if (exchange) {
     const int token = (*ar.dstep) * ar.n_ar + ar.index + 1;
@@ -678,15 +703,22 @@ void sum_norm_q8(float* x, const float* partial, int n, int rows, const ArArgs* 
                  int8_t* xq, float* xd, cudaStream_t s, const void* pf, size_t pf_bytes) {
   if (n != 5120) throw std::runtime_error("sum_norm_q8: n must be 5120");
   ArArgs a = ar ? *ar : ArArgs{};
+  // extra blocks that only prefetch (Q27_PF_BLOCKS, default 4; Q27_PF_INROW=1: prefetch from the row blocks as before)
+  static const int pfb = [] {
+    if (const char* e = getenv("Q27_PF_INROW"); e && e[0] == '1') return 0;
+    const char* e = getenv("Q27_PF_BLOCKS");
+    return e ? std::max(0, atoi(e)) : 4;
+  }();
+  const int grid = rows + (pf && pf_bytes && pfb ? pfb : 0);
   if (wire_qb() == 16)
-    launch_k(sum_norm_q8_kernel<5, 1, 16>, rows, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
-             pf_bytes);
+    launch_k(sum_norm_q8_kernel<5, 1, 16>, grid, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
+             pf_bytes, rows);
   else if (wire_q8())
-    launch_k(sum_norm_q8_kernel<5, 1>, rows, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
-             pf_bytes);
+    launch_k(sum_norm_q8_kernel<5, 1>, grid, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
+             pf_bytes, rows);
   else
-    launch_k(sum_norm_q8_kernel<5, 0>, rows, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
-             pf_bytes);
+    launch_k(sum_norm_q8_kernel<5, 0>, grid, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
+             pf_bytes, rows);
 }
 void swiglu_q8(const float* g, const float* u, int8_t* xq, float* xd, int n, cudaStream_t s, float* xs) {
   if (n % 32) throw std::runtime_error("swiglu_q8: n % 32");

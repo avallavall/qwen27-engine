@@ -91,6 +91,9 @@ struct ArArgs {
   // of a pass (ef not read).
   float* ef = nullptr;
   int ef_first = 1;
+  // Q27_SUMPROF=1 only: phase times of the q8 wire path, accumulated per exchange index, [n_ar][8] u64:
+  // 0 quantize + write own partial + fence, 1 flag + wait for the peer, 2 read peer, 3 add + norm, 4 calls, 5 total.
+  unsigned long long* tprof = nullptr;
 };
 // RMSNorm of `rows` rows (n = 5120) -> h (f32, may be null) and q8_1 (xq, xd).
 void rmsnorm_q8(const float* x, const float* w, float* h, int8_t* xq, float* xd, int n, int rows, float eps, cudaStream_t s,

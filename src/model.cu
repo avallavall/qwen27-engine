@@ -452,6 +452,7 @@ Decoder::Decoder(const Model& m, int n_ctx, bool kv_q8) : m_(m), n_ctx_(n_ctx), 
     R.hfin = alloc<float>(R, T * E); R.hrows = alloc<float>(R, T * E); R.mtp_h = alloc<float>(R, T * E);
     R.pend_h = alloc<float>(R, E); R.cat = alloc<float>(R, T * 2 * E);
     R.ef = alloc<float>(R, T * E);
+    if (const char* e = getenv("Q27_SUMPROF"); e && e[0] == '1') R.tprof = alloc<unsigned long long>(R, (size_t)kNex * 8);
     R.qkv = alloc<float>(R, T * sh.conv_channels()); R.z = alloc<float>(R, T * sh.vh * hp.ssm_dim);
     R.ab = alloc<float>(R, 2 * T * sh.vh); R.g = alloc<float>(R, T * sh.vh); R.beta = alloc<float>(R, T * sh.vh);
     R.conv = alloc<float>(R, T * sh.conv_channels());
@@ -506,6 +507,23 @@ Decoder::Decoder(const Model& m, int n_ctx, bool kv_q8) : m_(m), n_ctx_(n_ctx), 
 }
 
 Decoder::~Decoder() {
+  // Q27_SUMPROF=1: average phase times of the cross-card sums (verify = exchange indices 0..127 of the step graph).
+  for (size_t ri = 0; ri < r_.size(); ri++) {
+    if (!r_[ri].tprof) continue;
+    cudaSetDevice(r_[ri].sh->dev);
+    std::vector<unsigned long long> h((size_t)kNex * 8);
+    cudaMemcpy(h.data(), r_[ri].tprof, h.size() * 8, cudaMemcpyDeviceToHost);
+    auto line = [&](const char* name, int i0, int i1) {
+      double s[6] = {0, 0, 0, 0, 0, 0};
+      for (int i = i0; i < i1; i++) for (int k = 0; k < 6; k++) s[k] += (double)h[(size_t)i * 8 + k];
+      if (s[4] == 0) return;
+      fprintf(stderr, "  dev %d %-14s n %7.0f | write %5.1f  wait %5.1f  read %5.1f  total %5.1f us (to the add)\n",
+              r_[ri].sh->dev, name, s[4], s[0] / s[4] / 1e3, s[1] / s[4] / 1e3, s[2] / s[4] / 1e3, s[5] / s[4] / 1e3);
+    };
+    fprintf(stderr, "sum phases (Q27_SUMPROF), card %zu:\n", ri);
+    line("idx 0-127", 0, 128);
+    for (int i = 128; i < kNex; i++) { char nm[32]; snprintf(nm, sizeof nm, "idx %d", i); line(nm, i, i + 1); }
+  }
   for (size_t ri = 0; ri < ss_.size(); ri++) {
     cudaSetDevice(r_[ri].sh->dev);
     cudaStreamSynchronize(ss_[ri]);
@@ -624,6 +642,7 @@ void Decoder::sum_norm(int ri, const float* partial, int T, int& ix, bool with_s
   a.err = ar_err_;
   a.ef = ef_off() ? nullptr : R.ef;
   a.ef_first = ef_first_ ? 1 : 0;
+  a.tprof = R.tprof;
   ef_first_ = false;
   sum_norm_q8(R.x, partial, hp.n_embd, T, &a, w, hp.eps, h, R.xq, R.xd, R.s, pdl_sum() ? nullptr : pf, pdl_sum() ? 0 : pfb);
   if (pdl_sum()) pdl_once() = true;

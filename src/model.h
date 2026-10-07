@@ -212,6 +212,7 @@ class Decoder {
     float *x, *h, *m_out, *qkv, *z, *ab, *g, *beta, *conv, *o, *y, *qg, *k, *v, *qn, *fg, *fu, *act, *logits;
     float *hfin, *hrows, *mtp_h, *pend_h, *cat;
     float* ef;         // q8 wire error feedback [kMaxT][n_embd]
+    unsigned long long* tprof = nullptr;  // Q27_SUMPROF=1: sum phase times per exchange index (ArArgs::tprof)
     int8_t* xq;
     float* xd;
     int* dtok;         // device: tokens [kMaxT]
