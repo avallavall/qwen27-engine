@@ -302,6 +302,13 @@ void Engine::prefill_with_ckpts(Job& j, const GenRequest& R, int from) {
     cps.push_back(bnd[bnd.size() - 2]);  // start of the last message
   }
   if (!bnd.empty()) cps.push_back(bnd.back());  // start of the generation prompt
+  // Near the end of a long last message: a request that changes only the end of that message (a regenerate, a new
+  // question about the same long document) restarts here instead of at the last 16k checkpoint (llama.cpp keeps a
+  // checkpoint shortly before the end of each prompt for the same reason).
+  if (bnd.size() >= 2) {
+    const int near_end = (bnd.back() - 512) / 256 * 256;
+    if (near_end > bnd[bnd.size() - 2] + 1024) cps.push_back(near_end);
+  }
   for (const ImageSpan& s : R.images) cps.push_back(s.start + s.plan.n_tokens + 1);  // after <|vision_end|>: a new
                                                                                      // question on the same image
   for (int p = opt_.ckpt_every; p < n; p += opt_.ckpt_every) cps.push_back(p);
