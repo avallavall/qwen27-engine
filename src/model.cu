@@ -13,6 +13,7 @@
 #include "common.cuh"
 #include "ops.h"
 #include "prefill.h"
+#include "prof.h"
 #include "sampling.h"
 
 namespace q27 {
@@ -221,7 +222,14 @@ void Model::set_draft_vocab(std::vector<int> ids) {
   std::sort(ids.begin(), ids.end());
   ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
   const GTensor& t = g_->tensor("output.weight");
-  for (auto& sh : shards) {
+  // The rows come from the GGUF (host memory), so any card can score any token: split the subset in equal parts
+  // (the frequent ids are mostly low, which put almost all rows on card 0 when split by vocab half).
+  std::vector<char> used(hp_.vocab, 0);
+  for (int id : ids) used[id] = 1;
+  const int nsh = (int)shards.size();
+  int next_pad = 0;
+  for (int r = 0; r < nsh; r++) {
+    Shard& sh = shards[r];
     CK(cudaSetDevice(sh.dev));
     if (sh.draft_n) {
       qmat_free(sh.draft_out);
@@ -230,12 +238,13 @@ void Model::set_draft_vocab(std::vector<int> ids) {
       sh.draft_n = 0;
     }
     if (ids.empty()) continue;
-    std::vector<int> rows;
-    std::vector<char> in(sh.vocab_n, 0);
-    for (int id : ids)
-      if (id >= sh.vocab0 && id < sh.vocab0 + sh.vocab_n) { rows.push_back(id); in[id - sh.vocab0] = 1; }
-    for (int i = 0; rows.size() % 128 && i < sh.vocab_n; i++)  // pad with the lowest ids not yet in
-      if (!in[i]) { rows.push_back(sh.vocab0 + i); in[i] = 1; }
+    const size_t a = ids.size() * r / nsh, b = ids.size() * (r + 1) / nsh;
+    std::vector<int> rows(ids.begin() + a, ids.begin() + b);
+    while (rows.size() % 128) {  // pad with the lowest ids in no card's part
+      while (used[next_pad]) next_pad++;
+      rows.push_back(next_pad);
+      used[next_pad] = 1;
+    }
     std::sort(rows.begin(), rows.end());
     const size_t scratch_bytes = (size_t)t.row_bytes() * rows.size();
     void* scratch;
@@ -421,6 +430,9 @@ Decoder::Decoder(const Model& m, int n_ctx, bool kv_q8) : m_(m), n_ctx_(n_ctx), 
     const Shard& sh = *R.sh;
     CK(cudaSetDevice(sh.dev));
     CK(cudaStreamCreateWithFlags(&R.s, cudaStreamNonBlocking));
+    CK(cudaStreamCreateWithFlags(&R.s2, cudaStreamNonBlocking));
+    CK(cudaEventCreateWithFlags(&R.ev_fork, cudaEventDisableTiming));
+    CK(cudaEventCreateWithFlags(&R.ev_join, cudaEventDisableTiming));
     for (int il = 0; il < hp.n_layer; il++) {
       if (hp.is_attn(il)) {
         R.kc.push_back(alloc<uint8_t>(R, kv_cache_bytes(sh.kvh, n_ctx, kv_q8)));
@@ -436,6 +448,7 @@ Decoder::Decoder(const Model& m, int n_ctx, bool kv_q8) : m_(m), n_ctx_(n_ctx), 
     R.x = alloc<float>(R, T * E); R.h = alloc<float>(R, T * E); R.m_out = alloc<float>(R, T * E);
     R.hfin = alloc<float>(R, T * E); R.hrows = alloc<float>(R, T * E); R.mtp_h = alloc<float>(R, T * E);
     R.pend_h = alloc<float>(R, E); R.cat = alloc<float>(R, T * 2 * E);
+    R.ef = alloc<float>(R, T * E);
     R.qkv = alloc<float>(R, T * sh.conv_channels()); R.z = alloc<float>(R, T * sh.vh * hp.ssm_dim);
     R.ab = alloc<float>(R, 2 * T * sh.vh); R.g = alloc<float>(R, T * sh.vh); R.beta = alloc<float>(R, T * sh.vh);
     R.conv = alloc<float>(R, T * sh.conv_channels());
@@ -503,6 +516,9 @@ Decoder::~Decoder() {
     for (void* p : R.allocs) cudaFree(p);
     if (R.hin) cudaFreeHost(R.hin);
     if (R.s) cudaStreamDestroy(R.s);
+    if (R.s2) cudaStreamDestroy(R.s2);
+    if (R.ev_fork) cudaEventDestroy(R.ev_fork);
+    if (R.ev_join) cudaEventDestroy(R.ev_join);
   }
   for (auto& P : pr_) if (P.htok) cudaFreeHost(P.htok);
   for (auto& P : pr_) if (P.hrope) cudaFreeHost(P.hrope);
@@ -539,12 +555,31 @@ int Decoder::position() const { return hpos_; }
 
 // L2 prefetch budget per sum (the L2 is 32 MiB; the running GEMV streams through it too).
 static size_t pf_budget() {
-  static const size_t b = [] { const char* e = getenv("Q27_PF_MB"); return (size_t)(e ? atoi(e) : 8) << 20; }();
+  // 8 MB was best with the bf16 wire; with the shorter q8 wire, 4 MB (2026-10-07, benchb.py)
+  static const size_t b = [] { const char* e = getenv("Q27_PF_MB"); return (size_t)(e ? atoi(e) : wire_q8() ? 4 : 8) << 20; }();
   return b;
+}
+
+// L2 prefetch also in the kernels that do not wait (GDN conv, attention prep): measured slower (2026-10-06), so off
+// unless Q27_PF_MID=1. The kernels that wait for the other card (cross-card sums) always prefetch.
+// Q27_PDL_SUM=1: the GEMV after each cross-card sum starts early (PDL) and fetches its weights itself; the sum kernel
+// then does no L2 prefetch.
+static bool pdl_sum() {
+  static const bool v = [] { const char* e = getenv("Q27_PDL_SUM"); return e && e[0] == '1'; }();
+  return v;
+}
+static bool pf_mid() {
+  static const bool v = [] { const char* e = getenv("Q27_PF_MID"); return e && e[0] == '1'; }();
+  return v;
 }
 
 // Debug: Q27_UNFUSED bit mask runs the unfused kernel sequence (1 sums+norms, 2 GDN input, 4 gated norm,
 // 8 SwiGLU, 16 attention output).
+// Q27_EF=0 turns off the error feedback of the q8 wire (for measurements).
+static bool ef_off() {
+  static const bool v = [] { const char* e = getenv("Q27_EF"); return e && e[0] == '0'; }();
+  return v;
+}
 static int unfused() {
   static const int u = [] { const char* e = getenv("Q27_UNFUSED"); return e ? atoi(e) : 0; }();
   return u;
@@ -584,7 +619,11 @@ void Decoder::sum_norm(int ri, const float* partial, int T, int& ix, bool with_s
   a.n_ar = kNex;
   a.index = index;
   a.err = ar_err_;
-  sum_norm_q8(R.x, partial, hp.n_embd, T, &a, w, hp.eps, h, R.xq, R.xd, R.s, pf, pfb);
+  a.ef = ef_off() ? nullptr : R.ef;
+  a.ef_first = ef_first_ ? 1 : 0;
+  ef_first_ = false;
+  sum_norm_q8(R.x, partial, hp.n_embd, T, &a, w, hp.eps, h, R.xq, R.xd, R.s, pdl_sum() ? nullptr : pf, pdl_sum() ? 0 : pfb);
+  if (pdl_sum()) pdl_once() = true;
 }
 
 void Decoder::candidates(int ri, const float* logits, int rows, bool draft, CandRow* out, int& ix, bool with_sums) {
@@ -606,11 +645,17 @@ void Decoder::attn_layer(int ri, const Layer& L, void* kc, void* vc, int T, int&
   const Hparams& hp = m_.hp();
   cudaStream_t s = R.s;
   const float theta_scale = powf(hp.rope_base, -2.0f / hp.rope_dims);
+  {
+    cudaStream_t b = fork(ri);
+    qgemv(L.wk, R.xq, R.xd, R.k, T, b);
+    qgemv(L.wv, R.xq, R.xd, R.v, T, b);
+  }
   qgemv(L.wq, R.xq, R.xd, R.qg, T, s);
-  qgemv(L.wk, R.xq, R.xd, R.k, T, s);
-  qgemv(L.wv, R.xq, R.xd, R.v, T, s);
+  join(ri);
+  mk(ri, "attn.qkv");
   attn_prep(R.qg, R.k, R.v, L.q_norm, L.k_norm, R.qn, kc, vc, R.dpos, T, hp.eps, theta_scale, sh.qh, sh.kvh, n_ctx_, kv_q8_, s,
-            L.wo.buf, std::min(L.wo.bytes, pf_budget()), nullptr, R.ddelta);
+            pf_mid() ? L.wo.buf : nullptr, pf_mid() ? std::min(L.wo.bytes, pf_budget()) : 0, nullptr, R.ddelta);
+  mk(ri, "attn.prep");
   if (unfused() & 16) {
     attn_decode(R.qn, R.qg, kc, vc, R.o, nullptr, nullptr, R.dpos, T, 1.0f / sqrtf((float)hp.head_dim), sh.qh, sh.kvh, n_ctx_,
                 kv_q8_, s);
@@ -618,20 +663,28 @@ void Decoder::attn_layer(int ri, const Layer& L, void* kc, void* vc, int T, int&
   } else
   attn_decode(R.qn, R.qg, kc, vc, nullptr, R.xq, R.xd, R.dpos, T, 1.0f / sqrtf((float)hp.head_dim), sh.qh, sh.kvh, n_ctx_,
               kv_q8_, s);
+  mk(ri, "attn.decode");
   qgemv(L.wo, R.xq, R.xd, R.m_out, T, s);
+  mk(ri, "attn.o");
   sum_norm(ri, R.m_out, T, ix, with_sums, L.post_norm, nullptr, &L.ffn_gate);
+  mk(ri, "sum.attn");
 }
 
 void Decoder::ffn(int ri, const Layer& L, int T, int& ix, bool with_sums, const float* next_w, float* next_h, const QMat* next) {
   Rank& R = r_[ri];
   const Shard& sh = *R.sh;
   cudaStream_t s = R.s;
+  qgemv(L.ffn_up, R.xq, R.xd, R.fu, T, fork(ri));
   qgemv(L.ffn_gate, R.xq, R.xd, R.fg, T, s);
-  qgemv(L.ffn_up, R.xq, R.xd, R.fu, T, s);
+  join(ri);
+  mk(ri, "ffn.gate+up");
   if (unfused() & 8) { swiglu(R.fg, R.fu, R.act, T * sh.ff, s); quantize_q8_1(R.act, R.xq, R.xd, sh.ff, T, s); }
   else swiglu_q8(R.fg, R.fu, R.xq, R.xd, T * sh.ff, s);
+  mk(ri, "ffn.swiglu");
   qgemv(L.ffn_down, R.xq, R.xd, R.m_out, T, s);
+  mk(ri, "ffn.down");
   sum_norm(ri, R.m_out, T, ix, with_sums, next_w, next_h, next);
+  mk(ri, "sum.ffn");
 }
 
 // Target pass over T tokens (dtok, dpos). snaps: keep the GDN state after every token (verify).
@@ -644,29 +697,41 @@ void Decoder::forward(int ri, int T, bool snaps, bool set_plane, int& ix, bool w
   const float eps = hp.eps;
   cudaStream_t s = R.s;
   get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, R.dtok, T, R.x, E, s);
+  ef_first_ = true;
   if (unfused() & 1) { rmsnorm(R.x, sh.layers[0].attn_norm, R.h, E, T, eps, s); quantize_q8_1(R.h, R.xq, R.xd, E, T, s); }
   else rmsnorm_q8(R.x, sh.layers[0].attn_norm, R.h, R.xq, R.xd, E, T, eps, s);
+  mk(ri, "embed");
   int ig = 0, ia = 0;
   for (int il = 0; il < hp.n_layer; il++) {
     const Layer& L = sh.layers[il];
     if (!L.attn) {
       const int C = sh.conv_channels(), H = sh.vh, KH = sh.kh;
+      {
+        cudaStream_t b = fork(ri);
+        gemv_bf16_pair(L.alpha, L.beta, R.h, R.ab, R.ab + T * H, H, E, T, b);
+        qgemv(L.gate, R.xq, R.xd, R.z, T, b);
+      }
       qgemv(L.qkv, R.xq, R.xd, R.qkv, T, s);
-      qgemv(L.gate, R.xq, R.xd, R.z, T, s);
-      gemv_bf16_pair(L.alpha, L.beta, R.h, R.ab, R.ab + T * H, H, E, T, s);
+      join(ri);
+      mk(ri, "gdn.qkv+z+ab");
       if (unfused() & 2) {
         gdn_gates(R.ab, R.ab + T * H, L.ssm_a, L.dt_bias, R.g, R.beta, H, T, s);
         gdn_conv(R.qkv, L.conv_w, R.conv_st[ig], R.dplane, R.conv, C, T, snaps, s);
         l2norm_heads(R.conv, D, 2 * KH, T, C, eps, s);
       } else
       gdn_conv_l2(R.qkv, L.conv_w, R.conv_st[ig], R.dplane, R.conv, C, T, snaps, 2 * KH, eps, R.ab, R.ab + T * H, L.ssm_a,
-                  L.dt_bias, R.g, R.beta, H, s, L.ssm_out.buf, std::min(L.ssm_out.bytes, pf_budget()));
+                  L.dt_bias, R.g, R.beta, H, s, pf_mid() ? L.ssm_out.buf : nullptr, pf_mid() ? std::min(L.ssm_out.bytes, pf_budget()) : 0);
+      mk(ri, "gdn.conv");
       gdn_step(R.conv, R.conv + KH * D, R.conv + 2 * KH * D, C, R.g, R.beta, R.ssm_st[ig], R.dplane, R.o, H, KH, T,
                1.0f / sqrtf((float)D), snaps, s);
+      mk(ri, "gdn.step");
       if (unfused() & 4) { gated_rmsnorm(R.o, L.ssm_norm, R.z, R.y, D, T * H, eps, s); quantize_q8_1(R.y, R.xq, R.xd, H * D, T, s); }
       else gated_rmsnorm_q8(R.o, L.ssm_norm, R.z, R.xq, R.xd, T * H, eps, s);
+      mk(ri, "gdn.gnorm");
       qgemv(L.ssm_out, R.xq, R.xd, R.m_out, T, s);
+      mk(ri, "gdn.out");
       sum_norm(ri, R.m_out, T, ix, with_sums, L.post_norm, nullptr, &L.ffn_gate);
+      mk(ri, "sum.gdn");
       ig++;
     } else {
       attn_layer(ri, L, R.kc[ia], R.vc[ia], T, ix, with_sums);
@@ -679,6 +744,7 @@ void Decoder::forward(int ri, int T, bool snaps, bool set_plane, int& ix, bool w
   }
   if (set_plane) set_int(R.dplane, T - 1, s);
   qgemv(sh.output, R.xq, R.xd, R.logits, T, s);
+  mk(ri, "output");
 }
 
 // MTP pass over T rows: tokens dtok at dpos, hidden inputs hrows. Writes mtp_h and (if logits) logits.
@@ -689,15 +755,19 @@ void Decoder::mtp_forward(int ri, int T, bool logits, int& ix, bool with_sums) {
   const int E = hp.n_embd;
   cudaStream_t s = R.s;
   get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, R.dtok, T, R.x, E, s);
+  ef_first_ = true;
   rmsnorm(R.x, sh.enorm, R.cat, E, T, hp.eps, s, 2 * E);           // cat[t][0:E]   = enorm(e)
   rmsnorm(R.hrows, sh.hnorm, R.cat + E, E, T, hp.eps, s, 2 * E);   // cat[t][E:2E]  = hnorm(h)
   quantize_q8_1(R.cat, R.xq, R.xd, 2 * E, T, s);
+  mk(ri, "mtp.in");
   qgemv(sh.eh_proj, R.xq, R.xd, R.x, T, s);
+  mk(ri, "mtp.eh");
   rmsnorm_q8(R.x, sh.mtp.attn_norm, nullptr, R.xq, R.xd, E, T, hp.eps, s);
+  mk(ri, "mtp.norm");
   attn_layer(ri, sh.mtp, R.mkc, R.mvc, T, ix, with_sums);
   const QMat& head = sh.draft_n ? sh.draft_out : sh.output;  // draft logits: the draft vocabulary if set
   ffn(ri, sh.mtp, T, ix, with_sums, sh.shared_head_norm, R.mtp_h, logits ? &head : nullptr);
-  if (logits) qgemv(head, R.xq, R.xd, R.logits, T, s);
+  if (logits) { qgemv(head, R.xq, R.xd, R.logits, T, s); mk(ri, "mtp.head"); }
 }
 
 void Decoder::enqueue(int ri, Kind kind, bool with_sums) {
@@ -707,12 +777,17 @@ void Decoder::enqueue(int ri, Kind kind, bool with_sums) {
   St* st = (St*)R.st;
   int* host_emit = ri == 0 ? emit_host_ : nullptr;
   int ix = 0;
+  ph_ = "";
+  mk(ri, "start");
   auto drafts = [&]() {
+    ph_ = "D.";
     launch_k(k_copy, (E + 255) / 256, 256, 0, s, R.hrows, R.pend_h, E);
     for (int j = 0; j < kDrafts; j++) {
       mtp_forward(ri, 1, true, ix, with_sums);
       candidates(ri, R.logits, 1, true, R.qc + j, ix, with_sums);
+      mk(ri, "cand");
       sample_tokens(R.qc + j, 1, &st->d[j], sp_.seed, &st->counter, 100 + j, s);
+      mk(ri, "sample");
       if (j + 1 < kDrafts) {
         launch_k(k_next_draft, 1, 1, 0, s, st, j, R.dtok, R.dpos);
         launch_k(k_copy, (E + 255) / 256, 256, 0, s, R.hrows, R.mtp_h, E);
@@ -743,14 +818,21 @@ void Decoder::enqueue(int ri, Kind kind, bool with_sums) {
     }
     case kStep: {
       launch_k(k_prep_verify, 1, 1, 0, s, st, R.dtok, R.dpos);
+      ph_ = "V.";
       forward(ri, 4, true, false, ix, with_sums);
+      ph_ = "S.";
       candidates(ri, R.logits, 4, false, R.pc, ix, with_sums);
+      mk(ri, "cand");
       launch_k(k_accept, 1, 1, 0, s, st, R.pc, R.qc, sp_.seed, R.dplane, host_emit);
       launch_k(k_rows, (E + 255) / 256, 256, 0, s, R.hrows, R.pend_h, R.hfin, 4, E, st);
+      mk(ri, "accept");
+      ph_ = "C.";
       mtp_forward(ri, 4, false, ix, with_sums);
       launch_k(k_advance, 1, 1, 0, s, st, R.dtok, R.dpos);
       drafts();
       launch_k(k_finish, 1, 1, 0, s, st);
+      ph_ = "";
+      mk(ri, "end");
       break;
     }
     default: break;
@@ -791,7 +873,9 @@ void Decoder::run(Kind k) {
     if (use_graph && !R.graph[k]) {
       cudaGraph_t g;
       CK(cudaStreamBeginCapture(R.s, cudaStreamCaptureModeThreadLocal));
+      R.prof_a[k] = prof::next_slot();
       enqueue(ri, k, true);
+      R.prof_b[k] = prof::next_slot();
       CK(cudaStreamEndCapture(R.s, &g));
       CK(cudaGraphInstantiate(&R.graph[k], g, 0));
       CK(cudaGraphDestroy(g));
@@ -806,6 +890,28 @@ void Decoder::run(Kind k) {
   }
   for (auto& R : r_) { CK(cudaSetDevice(R.sh->dev)); CK(cudaStreamSynchronize(R.s)); }
   if (ar_err_ && *ar_err_) throw std::runtime_error("cross-card exchange timed out");
+  if (prof::on() && k == kStep)
+    for (auto& R : r_) { CK(cudaSetDevice(R.sh->dev)); prof::collect(R.prof_a[k], R.prof_b[k]); }
+}
+static bool branches() {
+  static const bool v = [] { const char* e = getenv("Q27_BRANCH"); return !(e && e[0] == '0'); }();
+  return v;
+}
+cudaStream_t Decoder::fork(int ri) {
+  Rank& R = r_[ri];
+  if (!branches()) return R.s;
+  CK(cudaEventRecord(R.ev_fork, R.s));
+  CK(cudaStreamWaitEvent(R.s2, R.ev_fork, 0));
+  return R.s2;
+}
+void Decoder::join(int ri) {
+  Rank& R = r_[ri];
+  if (!branches()) return;
+  CK(cudaEventRecord(R.ev_join, R.s2));
+  CK(cudaStreamWaitEvent(R.s, R.ev_join, 0));
+}
+void Decoder::mk(int ri, const char* what) {
+  if (prof::on()) prof::mark(r_[ri].s, (ph_ + what).c_str());
 }
 
 void Decoder::step(const int* tokens, int T, int pos) {
@@ -1211,7 +1317,12 @@ void load_memops() {
 }
 }  // namespace
 
-constexpr int kPfParts = 130;  // 64 layers x (block, FFN) + MTP (attention, FFN)
+constexpr int kPfParts = 130;
+// Test switch: Q27_PF_NOEX=1 skips the cross-card exchange in prompt reading (wrong results; shows the compute time).
+static bool pf_noex() {
+  static const bool v = [] { const char* e = getenv("Q27_PF_NOEX"); return e && e[0] == '1'; }();
+  return v;
+}  // 64 layers x (block, FFN) + MTP (attention, FFN)
 
 void Decoder::pf2_alloc() {
   const Hparams& hp = m_.hp();
@@ -1230,6 +1341,7 @@ void Decoder::pf2_alloc() {
     }
     P.sendbuf = alloc<__nv_bfloat16>(R, (size_t)MB * E);
     P.recvbuf = alloc<__nv_bfloat16>(R, (size_t)MB * E);
+    if (m_.tp() == 2 && wire_q8()) P.ef = alloc<float>(R, (size_t)MB * E);
     P.dpos2 = alloc<int>(R, 2);
     P.dplane2 = alloc<int>(R, 1);
   }
@@ -1263,21 +1375,32 @@ void Decoder::pf2_part(int ri, int p, const PfHalf& hv) {
     float* qn = P.qn + r0 * sh.qh * hp.head_dim;
     float* o = P.o + r0 * std::max(sh.vh * hp.ssm_dim, sh.qh * hp.head_dim);
     qgemm(L.wq, xq, xd, xs, qg, Mh, s);
+    mk(ri, "attn.q");
     qgemm(L.wk, xq, xd, xs, k, Mh, s);
     qgemm(L.wv, xq, xd, xs, v, Mh, s);
+    mk(ri, "attn.kv");
     attn_prep(qg, k, v, L.q_norm, L.k_norm, qn, kc, vc, hv.dpos, Mh, eps, theta_scale, sh.qh, sh.kvh, n_ctx_, kv_q8_, s,
               nullptr, 0, rope_dev(ri, (int)r0), R.ddelta);
-    attn_prefill(qn, qg, kc, vc, o, hv.dpos, Mh, 1.0f / sqrtf((float)hp.head_dim), sh.qh, sh.kvh, n_ctx_, kv_q8_, s);
+    mk(ri, "attn.prep");
+    attn_prefill(qn, qg, kc, vc, o, hv.dpos, Mh, 1.0f / sqrtf((float)hp.head_dim), sh.qh, sh.kvh, n_ctx_, kv_q8_, s,
+                 hpos_ + (int)r0);
+    mk(ri, "attn.fa");
     quantize_q8_1(o, xq, xd, sh.qh * hp.head_dim, Mh, s, xs);
+    mk(ri, "attn.quant");
     qgemm(L.wo, xq, xd, xs, m_out, Mh, s);
+    mk(ri, "attn.o");
   };
   auto ffn = [&](const Layer& L) {
     float* fg = P.fg + r0 * sh.ff;
     float* fu = P.fu + r0 * sh.ff;
     qgemm(L.ffn_gate, xq, xd, xs, fg, Mh, s);
+    mk(ri, "ffn.gate");
     qgemm(L.ffn_up, xq, xd, xs, fu, Mh, s);
+    mk(ri, "ffn.up");
     swiglu_q8(fg, fu, xq, xd, Mh * sh.ff, s, xs);
+    mk(ri, "ffn.swiglu");
     qgemm(L.ffn_down, xq, xd, xs, m_out, Mh, s);
+    mk(ri, "ffn.down");
   };
   if (p < 2 * hp.n_layer) {
     const int il = p / 2;
@@ -1293,14 +1416,21 @@ void Decoder::pf2_part(int ri, int p, const PfHalf& hv) {
     float* conv = P.conv + r0 * C;
     float* o = P.o + r0 * std::max(sh.vh * hp.ssm_dim, sh.qh * hp.head_dim);
     qgemm(L.qkv, xq, xd, xs, qkv, Mh, s);
+    mk(ri, "gdn.qkv");
     qgemm(L.gate, xq, xd, xs, z, Mh, s);
+    mk(ri, "gdn.z");
     bf16_pair_gemm(L.alpha, L.beta, P.h + r0 * E, ab, ab + (size_t)Mh * H, H, E, Mh, s);
+    mk(ri, "gdn.ab");
     gdn_conv_prefill(qkv, L.conv_w, R.conv_st[ig], hv.dplane, conv, C, Mh, 2 * KH, eps, ab, ab + (size_t)Mh * H, L.ssm_a, L.dt_bias, g,
                      beta, H, s);
+    mk(ri, "gdn.conv");
     gdn_step(conv, conv + KH * D, conv + 2 * KH * D, C, g, beta, R.ssm_st[ig], hv.dplane, o, H, KH, Mh, 1.0f / sqrtf((float)D),
              false, s, true);
+    mk(ri, "gdn.step");
     gated_rmsnorm_q8(o, L.ssm_norm, z, xq, xd, Mh * H, eps, s, xs);
+    mk(ri, "gdn.gnorm");
     qgemm(L.ssm_out, xq, xd, xs, m_out, Mh, s);
+    mk(ri, "gdn.out");
     return;
   }
   if (p == 2 * hp.n_layer) {  // MTP: inputs (token embedding, target hidden of the previous token), then attention
@@ -1326,13 +1456,14 @@ void Decoder::pf2_part(int ri, int p, const PfHalf& hv) {
 }
 
 // Exchange of half hv's partial (part p) on the copy-engine stream.
-void Decoder::pf2_send(int ri, const PfHalf& hv) {
+void Decoder::pf2_send(int ri, const PfHalf& hv, int p) {
+  const bool hv_first = p == 0 || p == 2 * m_.hp().n_layer;  // first exchange of the target pass or of the MTP pass
   Rank& R = r_[ri];
   PRank& P = pr_[ri];
   const int E = m_.hp().n_embd;
   const size_t r0 = hv.r0, n = (size_t)hv.Mh * E;
   CK(cudaEventRecord(P.ev_part[hv.half], R.s));
-  if (m_.tp() == 1) return;
+  if (m_.tp() == 1 || pf_noex()) return;
   const int token = ++P.tok2[hv.half];
   const int slot = token & 1;
   const size_t rows_cap = pmb_ / 2;
@@ -1342,12 +1473,16 @@ void Decoder::pf2_send(int ri, const PfHalf& hv) {
   int* fo = pex2_flags_ + (((size_t)hv.half * 2 + slot) * 2 + (1 - ri)) * 32;
   cudaStream_t x = P.sx;
   CK(cudaStreamWaitEvent(x, P.ev_part[hv.half], 0));
-  to_bf16(P.m_out + r0 * E, P.sendbuf + r0 * E, n, x);
-  CK(cudaMemcpyAsync(mine, P.sendbuf + r0 * E, n * 2, cudaMemcpyDeviceToHost, x));
+  const bool q8 = wire_q8();
+  const size_t rb = q8 ? (size_t)E + 2 * E / wire_qb() : (size_t)E * 2;  // wire bytes per row
+  uint8_t* sb = (uint8_t*)P.sendbuf + r0 * rb;
+  if (q8) to_q8_wire(P.m_out + r0 * E, ef_off() ? nullptr : P.ef + r0 * E, hv_first, sb, E, hv.Mh, x);
+  else to_bf16(P.m_out + r0 * E, P.sendbuf + r0 * E, n, x);
+  CK(cudaMemcpyAsync(mine, sb, hv.Mh * rb, cudaMemcpyDeviceToHost, x));
   if (p_write32((CUstream)x, (CUdeviceptr)fm, (cuuint32_t)token, 0) != CUDA_SUCCESS) throw std::runtime_error("cuStreamWriteValue32");
   if (p_wait32((CUstream)x, (CUdeviceptr)fo, (cuuint32_t)token, CU_STREAM_WAIT_VALUE_EQ) != CUDA_SUCCESS)
     throw std::runtime_error("cuStreamWaitValue32");
-  CK(cudaMemcpyAsync(P.recvbuf + r0 * E, other, n * 2, cudaMemcpyHostToDevice, x));
+  CK(cudaMemcpyAsync((uint8_t*)P.recvbuf + r0 * rb, other, hv.Mh * rb, cudaMemcpyHostToDevice, x));
   CK(cudaEventRecord(P.ev_recv[hv.half], x));
   cudaStreamQuery(x);
 }
@@ -1370,9 +1505,16 @@ void Decoder::pf2_norm(int ri, int p, const PfHalf& hv) {
   } else {
     w = p == 2 * hp.n_layer ? sh.mtp.post_norm : sh.shared_head_norm;
   }
-  if (m_.tp() == 2) CK(cudaStreamWaitEvent(R.s, P.ev_recv[hv.half], 0));
-  add_norm_rows(P.x + r0 * E, P.m_out + r0 * E, m_.tp() == 2 ? P.recvbuf + r0 * E : nullptr, E, hv.Mh, w, hp.eps, h, hv.xq, hv.xd,
+  const bool ex = m_.tp() == 2 && !pf_noex();
+  if (ex) CK(cudaStreamWaitEvent(R.s, P.ev_recv[hv.half], 0));
+  if (ex && wire_q8()) {
+    const size_t rb = (size_t)E + 2 * E / wire_qb();
+    add_norm_rows_q8(P.x + r0 * E, (const uint8_t*)P.sendbuf + r0 * rb, (const uint8_t*)P.recvbuf + r0 * rb, E, hv.Mh, w, hp.eps, h,
+                     hv.xq, hv.xd, hv.xs, R.s);
+  } else
+  add_norm_rows(P.x + r0 * E, P.m_out + r0 * E, ex ? P.recvbuf + r0 * E : nullptr, E, hv.Mh, w, hp.eps, h, hv.xq, hv.xd,
                 hv.xs, R.s);
+  mk(ri, "sum");
 }
 
 void Decoder::prefill_batch_ov(const int* tokens, int M, bool last, bool all_logits) {
@@ -1406,6 +1548,8 @@ void Decoder::prefill_batch_ov(const int* tokens, int M, bool last, bool all_log
       v.xs = P.xs + off * kmax / 16;
     }
     upload_rope(ri, M);
+    ph_ = "P.";
+    if (prof::on()) { prof::eager(true); mk(ri, "start"); }
     get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, P.tok, M, P.x, E, R.s, img_.empty() ? nullptr : img_[ri]);
     for (int h = 0; h < 2; h++)
       rmsnorm_q8(P.x + (size_t)hv[ri][h].r0 * E, sh.layers[0].attn_norm, P.h + (size_t)hv[ri][h].r0 * E, hv[ri][h].xq, hv[ri][h].xd, E,
@@ -1419,8 +1563,8 @@ void Decoder::prefill_batch_ov(const int* tokens, int M, bool last, bool all_log
     }
   };
   each([&](int ri) {
-    pf2_part(ri, 0, hv[ri][0]); pf2_send(ri, hv[ri][0]);
-    pf2_part(ri, 0, hv[ri][1]); pf2_send(ri, hv[ri][1]);
+    pf2_part(ri, 0, hv[ri][0]); pf2_send(ri, hv[ri][0], 0);
+    pf2_part(ri, 0, hv[ri][1]); pf2_send(ri, hv[ri][1], 0);
   });
   for (int p = 0; p < kPfParts; p++) {
     each([&](int ri) {
@@ -1437,7 +1581,7 @@ void Decoder::prefill_batch_ov(const int* tokens, int M, bool last, bool all_log
             qgemm(sh.output, v.xq, v.xd, v.xs, P.plog + (size_t)v.r0 * sh.vocab_n, v.Mh, R.s);
           }
         }
-        if (p + 1 < kPfParts) { pf2_part(ri, p + 1, v); pf2_send(ri, v); }
+        if (p + 1 < kPfParts) { pf2_part(ri, p + 1, v); pf2_send(ri, v, p + 1); }
       }
     });
   }
@@ -1450,6 +1594,9 @@ void Decoder::prefill_batch_ov(const int* tokens, int M, bool last, bool all_log
   }
   for (auto& R : r_) { CK(cudaSetDevice(R.sh->dev)); CK(cudaStreamSynchronize(R.s)); }
   for (auto& P : pr_) CK(cudaStreamSynchronize(P.sx));
+  if (prof::on())
+    for (auto& R : r_) { CK(cudaSetDevice(R.sh->dev)); prof::collect(prof::eager_base(), prof::next_slot()); prof::eager(false); }
+  ph_ = "";
   hpos_ += M;
 }
 

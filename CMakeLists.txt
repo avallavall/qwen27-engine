@@ -34,6 +34,7 @@ add_library(q27core STATIC
   src/qgemm.cu
   src/prefill.cu
   src/model.cu
+  src/prof.cu
   src/sampling.cu
   src/vision.cu
   src/vision_img.cpp
@@ -123,3 +124,11 @@ target_link_libraries(vocab_freq PRIVATE q27text)
 
 add_executable(test_parser tools/test_parser.cpp)
 target_link_libraries(test_parser PRIVATE q27text)
+
+add_executable(bench_link2 tools/bench_link2.cu)
+target_compile_options(bench_link2 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${Q27_CUDA_FLAGS}>)
+target_link_libraries(bench_link2 PRIVATE q27core)
+
+add_executable(bench_gdnp tools/bench_gdnp.cu)
+target_compile_options(bench_gdnp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${Q27_CUDA_FLAGS}>)
+target_link_libraries(bench_gdnp PRIVATE q27core)

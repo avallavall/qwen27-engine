@@ -72,6 +72,7 @@ struct Kld {
       if (i == 0 || plb > pmax) { pmax = plb; imax_base = i; }
       if (plb > -16.f) sum += expf(plb) * (plb - logits[i] + max_logit);
     }
+    if (getenv("Q27_KLD_LIST") && sum > 0.01) printf("  position %ld: KLD %.4f\n", count, sum);
     sum_kld += sum; sum_kld2 += sum * sum; max_kld = std::max(max_kld, sum);
     count++;
     if (imax == imax_base) same_top++;

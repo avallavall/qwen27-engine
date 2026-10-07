@@ -2,8 +2,8 @@
 // reserves free, allocates the decoder, writes KV at the end of the context, and reports VRAM per card.
 // Then it allocates a block of the size reserved for vision on card 1 and runs again.
 // Usage: q27_ctx <model.gguf> [devices=0,1] [n_ctx=auto]
-// Reserves (MiB): card 0: prefill 512 + prompt-cache checkpoints 300 + desktop growth 600;
-//                 card 1: prefill 512 + checkpoints 300 + vision 1536.
+// Reserves (MiB), as q27_server: card 0: prefill 1100 + prompt-cache checkpoints 300 + desktop growth 600;
+//                 card 1: prefill 1100 + checkpoints 300 + vision 1536.
 #include "common.cuh"
 #include "model.h"
 
@@ -39,7 +39,7 @@ int main(int argc, char** argv) try {
   const size_t MiB = 1 << 20;
   Model model(argv[1], devs);
   report(model, "after model load");
-  const std::vector<size_t> reserve = {(512 + 300 + 600) * MiB, (512 + 300 + 1536) * MiB};
+  const std::vector<size_t> reserve = {(1100 + 300 + 600) * MiB, (1100 + 300 + 1536) * MiB};  // as q27_server
   const int fit = Decoder::fit_ctx(model, reserve, Decoder::kv_q8_from_env());
   const int n_ctx = argc > 3 ? atoi(argv[3]) : fit;
   printf("KV %.1f KiB per token per card; decoder fixed %.0f MiB per card; fit_ctx = %d; using n_ctx = %d\n",

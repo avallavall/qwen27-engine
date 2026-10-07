@@ -13,6 +13,21 @@ bool pdl_enabled() {
   static const bool on = [] { const char* e = getenv("Q27_PDL"); return e && e[0] == '1'; }();
   return on;
 }
+bool& pdl_once() {
+  thread_local bool v = false;
+  return v;
+}
+bool wire_q8() { return wire_qb() != 0; }
+int wire_qb() {
+  // Default q8b16 (2026-10-07): same KLD as bf16 on the 1-token, 4-token, 32k and 131k tests, 44% fewer bytes.
+  static const int qb = [] {
+    const char* e = getenv("Q27_WIRE");
+    if (!e) return 16;
+    const std::string v(e);
+    return v == "q8" ? 32 : v == "q8b16" ? 16 : v == "bf16" ? 0 : throw std::runtime_error("Q27_WIRE: bf16, q8 or q8b16");
+  }();
+  return qb;
+}
 
 namespace {
 
@@ -107,7 +122,7 @@ __global__ void __launch_bounds__(1024) rmsnorm_q8_kernel(const float* __restric
 
 // x[row] += partial[row] (two cards: the sum of both cards' partials through mapped host memory, BF16 wire
 // as llama.cpp), then the RMSNorm of the new x[row] with weight w -> h (optional) and q8_1. Block per row.
-template <int NPT>
+template <int NPT, int WIRE, int QB = 32>
 __global__ void __launch_bounds__(1024) sum_norm_q8_kernel(float* __restrict__ x, const float* __restrict__ partial, ArArgs ar,
                                                            bool exchange, const float* __restrict__ w, float eps,
                                                            float* __restrict__ h, int8_t* __restrict__ xq,
@@ -120,7 +135,63 @@ __global__ void __launch_bounds__(1024) sum_norm_q8_kernel(float* __restrict__ x
   float* xr = x + row * n;
   const float* pr = partial + row * n;
   float v[NPT];
-  if (exchange) {
+  if (exchange && WIRE == 1) {
+    // q8 wire: int8 per value + fp16 scale per 32 values (rows [4][n] int8, then scales [4][n / 32]); each card adds
+    // the dequantized values of both partials, so both cards get the same x.
+    // Row layout on the wire: n int8 values, then n / 32 fp16 scales (n + n / 16 bytes, 16-byte aligned for n = 5120).
+    // Both directions go through shared memory so the link sees whole 16-byte loads and stores.
+    const int token = (*ar.dstep) * ar.n_ar + ar.index + 1;
+    const int rb = n + 2 * n / QB;
+    float* efr = ar.ef ? ar.ef + row * n : nullptr;
+    __shared__ __align__(16) int8_t sq[5120 + 2 * 5120 / QB];
+    uint4* mine16 = (uint4*)((int8_t*)ar.host_mine + row * rb);
+    const uint4* oth16 = (const uint4*)((const int8_t*)ar.host_other + row * rb);
+    __half* ssc = (__half*)(sq + n);
+    float own[NPT];
+#pragma unroll
+    for (int k = 0; k < NPT; k++) {
+      const int i = threadIdx.x + k * 1024;
+      const float y = efr && !ar.ef_first ? pr[i] + efr[i] : pr[i];
+      float amax = fabsf(y);
+#pragma unroll
+      for (int o = QB / 2; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+      const __half dh = __float2half(amax / 127.0f);
+      const int q = amax == 0.0f ? 0 : (int)roundf(y / (amax / 127.0f));
+      sq[i] = (int8_t)q;
+      if ((threadIdx.x & (QB - 1)) == 0) ssc[i / QB] = dh;
+      own[k] = __half2float(dh) * (float)q;
+      if (efr) efr[i] = y - own[k];
+    }
+    __syncthreads();
+    if (threadIdx.x < rb / 16) mine16[threadIdx.x] = ((const uint4*)sq)[threadIdx.x];
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      volatile int* fm = ar.flag_mine + row * 32;
+      volatile const int* fo = ar.flag_other + row * 32;
+      *fm = token;
+      __threadfence_system();
+      const long long t0 = clock64();
+      while (*fo != token) {
+        if (clock64() - t0 > 3000000000LL) { atomicAdd(ar.err, 1); break; }  // about 1 s: the peer is gone
+      }
+    }
+    __syncthreads();
+    __threadfence_system();
+    if (threadIdx.x < rb / 16) {
+      uint4 u;
+      asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(u.x), "=r"(u.y), "=r"(u.z), "=r"(u.w) : "l"(oth16 + threadIdx.x) : "memory");
+      ((uint4*)sq)[threadIdx.x] = u;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int k = 0; k < NPT; k++) {
+      const int i = threadIdx.x + k * 1024;
+      const float oth = __half2float(ssc[i / QB]) * (float)sq[i];
+      v[k] = xr[i] + (own[k] + oth);
+      xr[i] = v[k];
+    }
+  } else if (exchange) {
     const int token = (*ar.dstep) * ar.n_ar + ar.index + 1;
     __nv_bfloat16* mine = ar.host_mine + row * n;
     const __nv_bfloat16* other = ar.host_other + row * n;
@@ -399,6 +470,82 @@ __global__ void gdn_step_kernel(const float* __restrict__ q, const float* __rest
   }
 }
 
+// Delta rule over many tokens (prefill, flip mode): block = (head h, 32 value columns), 32 * GP threads; thread
+// (column c, part p) keeps state rows EPT*p .. EPT*p+EPT-1 of its column in registers, and the GP parts of a column add
+// their partial dot products with shuffles. q, k, v, g, beta of GT tokens at a time go through shared memory (one
+// global read per block instead of one per column), q and k as float4 with a 4-float pad per part (no bank
+// conflicts). Final state to plane (*in_plane == 0 ? 1 : 0).
+constexpr int GT = 32, GP = 8, EPT = 128 / GP, GPAD = EPT + 4;
+__global__ void __launch_bounds__(32 * GP) gdn_prefill_kernel(const float* __restrict__ q, const float* __restrict__ k,
+                                                              const float* __restrict__ v, int stride, const float* __restrict__ g,
+                                                              const float* __restrict__ beta, float* __restrict__ planes,
+                                                              const int* __restrict__ in_plane, float* __restrict__ o, int H, int HK,
+                                                              int M, float scale) {
+  pdl_wait();
+  pdl_trigger();
+  __shared__ __align__(16) float sq[GT][GP * GPAD];
+  __shared__ __align__(16) float sk[GT][GP * GPAD];
+  __shared__ float sv[GT][32], sgv[GT], sbv[GT];
+  constexpr int NT = 32 * GP;
+  const int h = blockIdx.x, cg = blockIdx.y, tid = threadIdx.x, c = tid / GP, p = tid % GP, col = cg * 32 + c;
+  const int kh = h % HK;
+  const size_t plane_sz = (size_t)H * 128 * 128;
+  const int pin = *in_plane;
+  const float* Min = planes + (size_t)pin * plane_sz + ((size_t)h * 128 + col) * 128 + p * EPT;
+  float s[EPT];
+#pragma unroll
+  for (int i = 0; i < EPT; i += 4) {
+    const float4 t4 = *(const float4*)(Min + i);
+    s[i] = t4.x; s[i + 1] = t4.y; s[i + 2] = t4.z; s[i + 3] = t4.w;
+  }
+  for (int t0 = 0; t0 < M; t0 += GT) {
+    const int nt = min(GT, M - t0);
+    __syncthreads();
+    for (int i = tid; i < nt * 32; i += NT) {  // float4 pieces: 32 per token per vector
+      const int t = i >> 5, e4 = (i & 31) * 4, pe = (e4 / EPT) * GPAD + (e4 % EPT);
+      *(float4*)&sq[t][pe] = *(const float4*)(q + (size_t)(t0 + t) * stride + kh * 128 + e4);
+      *(float4*)&sk[t][pe] = *(const float4*)(k + (size_t)(t0 + t) * stride + kh * 128 + e4);
+    }
+    for (int i = tid; i < nt * 32; i += NT) {
+      const int t = i >> 5, e = i & 31;
+      sv[t][e] = v[(size_t)(t0 + t) * stride + h * 128 + cg * 32 + e];
+    }
+    if (tid < nt) { sgv[tid] = expf(g[(size_t)(t0 + tid) * H + h]); sbv[tid] = beta[(size_t)(t0 + tid) * H + h]; }
+    __syncthreads();
+    for (int t = 0; t < nt; t++) {
+      float kt[EPT], qt[EPT];
+#pragma unroll
+      for (int i = 0; i < EPT; i += 4) {
+        const float4 k4 = *(const float4*)&sk[t][p * GPAD + i];
+        const float4 q4 = *(const float4*)&sq[t][p * GPAD + i];
+        kt[i] = k4.x; kt[i + 1] = k4.y; kt[i + 2] = k4.z; kt[i + 3] = k4.w;
+        qt[i] = q4.x; qt[i + 1] = q4.y; qt[i + 2] = q4.z; qt[i + 3] = q4.w;
+      }
+      float kq[4] = {0.f, 0.f, 0.f, 0.f};  // 4 independent sums (the FMA chains overlap)
+#pragma unroll
+      for (int i = 0; i < EPT; i++) kq[i & 3] += s[i] * kt[i];
+      float kv = (kq[0] + kq[1]) + (kq[2] + kq[3]);
+#pragma unroll
+      for (int o2 = 1; o2 < GP; o2 <<= 1) kv += __shfl_xor_sync(0xffffffffu, kv, o2);
+      const float gv = sgv[t];
+      const float delta = (sv[t][c] - gv * kv) * sbv[t];
+      float aq[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+      for (int i = 0; i < EPT; i++) {
+        s[i] = gv * s[i] + kt[i] * delta;
+        aq[i & 3] += s[i] * qt[i];
+      }
+      float at = (aq[0] + aq[1]) + (aq[2] + aq[3]);
+#pragma unroll
+      for (int o2 = 1; o2 < GP; o2 <<= 1) at += __shfl_xor_sync(0xffffffffu, at, o2);
+      if (p == 0) o[((size_t)(t0 + t) * H + h) * 128 + col] = at * scale;
+    }
+  }
+  float* W = planes + (size_t)(pin == 0 ? 1 : 0) * plane_sz + ((size_t)h * 128 + col) * 128 + p * EPT;
+#pragma unroll
+  for (int i = 0; i < EPT; i += 4) *(float4*)(W + i) = make_float4(s[i], s[i + 1], s[i + 2], s[i + 3]);
+}
+
 // One block of 128 threads per head: y = (rms_norm(o) * w) * silu(z)
 __global__ void gated_rmsnorm_kernel(const float* __restrict__ o, const float* __restrict__ w, const float* __restrict__ z,
                                      float* __restrict__ y, int n, float eps) {
@@ -531,8 +678,15 @@ void sum_norm_q8(float* x, const float* partial, int n, int rows, const ArArgs* 
                  int8_t* xq, float* xd, cudaStream_t s, const void* pf, size_t pf_bytes) {
   if (n != 5120) throw std::runtime_error("sum_norm_q8: n must be 5120");
   ArArgs a = ar ? *ar : ArArgs{};
-  launch_k(sum_norm_q8_kernel<5>, rows, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
-           pf_bytes);
+  if (wire_qb() == 16)
+    launch_k(sum_norm_q8_kernel<5, 1, 16>, rows, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
+             pf_bytes);
+  else if (wire_q8())
+    launch_k(sum_norm_q8_kernel<5, 1>, rows, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
+             pf_bytes);
+  else
+    launch_k(sum_norm_q8_kernel<5, 0>, rows, 1024, 0, s, x, partial, a, ar != nullptr, w, eps, h, xq, xd, n, (const uint8_t*)pf,
+             pf_bytes);
 }
 void swiglu_q8(const float* g, const float* u, int8_t* xq, float* xd, int n, cudaStream_t s, float* xs) {
   if (n % 32) throw std::runtime_error("swiglu_q8: n % 32");
@@ -597,6 +751,11 @@ void l2norm_heads(float* x, int n, int heads, int T, int stride, float eps, cuda
 }
 void gdn_step(const float* q, const float* k, const float* v, int stride, const float* g, const float* beta, float* planes,
               const int* in_plane, float* o, int H, int HK, int T, float scale, bool snapshots, cudaStream_t s, bool flip) {
+  static const bool old = [] { const char* e = getenv("Q27_GDN_OLD"); return e && e[0] == '1'; }();
+  if (flip && !snapshots && T > 4 && !old) {
+    launch_k(gdn_prefill_kernel, dim3(H, 4), 32 * GP, 0, s, q, k, v, stride, g, beta, planes, in_plane, o, H, HK, T, scale);
+    return;
+  }
   launch_k(gdn_step_kernel, dim3(H, 128 / 4), dim3(32, 4), 0, s, q, k, v, stride, g, beta, planes, in_plane, o, H, HK, T, scale,
                                                            snapshots, flip);
 }

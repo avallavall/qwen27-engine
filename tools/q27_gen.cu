@@ -10,6 +10,7 @@
 //          times and prints ms per step at that depth. Generated tokens stay in the context.
 #include "common.cuh"
 #include "model.h"
+#include "prof.h"
 #include "reffile.h"
 #include "tokenizer.h"
 
@@ -61,6 +62,7 @@ int main(int argc, char** argv) try {
         dec.prefill(ref.tokens.data() + src, n);
         const double s = std::chrono::duration<double>(clk::now() - t0).count();
         printf("fed %d tokens to depth %d in %.1f s (%.0f t/s)\n", n, dec.position(), s, n / s);
+        prof::report("prefill batch");
         src += n;
       }
       for (int run = 0; run < runs; run++) {
@@ -193,6 +195,7 @@ int main(int argc, char** argv) try {
       std::vector<int> toks;
       auto t0 = clk::now();
       toks.push_back(dec.begin(prompt, sp));
+      prof::report("prompt (prefill batches)");
       const double t_prompt = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
       int steps = 0;
       auto t1 = clk::now();
@@ -206,6 +209,7 @@ int main(int argc, char** argv) try {
       const int gen = (int)toks.size() - 1;
       printf("sample run %d: prompt %d tok in %.0f ms | %d tokens in %d steps: %.2f ms/step, %.2f tok/step, %.1f tok/s\n",
              run, np, t_prompt, gen, steps, ms / steps, (double)gen / steps, gen / (ms / 1000.0));
+      prof::report("sample step");
     }
   }
   return 0;

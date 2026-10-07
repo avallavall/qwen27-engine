@@ -21,6 +21,9 @@ __device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;\
 __device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); }
 // Q27_PDL=0 in the environment turns PDL off (plain stream order).
 bool pdl_enabled();
+// One-shot: the next launch_k on this host thread uses PDL even when Q27_PDL is off (used for the GEMV after a
+// cross-card sum, so it can fetch weights while the sum waits on the link).
+bool& pdl_once();
 
 template <typename... KArgs, typename... Args>
 inline void launch_k(void (*kern)(KArgs...), dim3 grid, dim3 block, size_t smem, cudaStream_t s, Args&&... args) {
@@ -31,7 +34,8 @@ inline void launch_k(void (*kern)(KArgs...), dim3 grid, dim3 block, size_t smem,
   cfg.stream = s;
   cudaLaunchAttribute attr[1];
   attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attr[0].val.programmaticStreamSerializationAllowed = pdl_enabled() ? 1 : 0;
+  attr[0].val.programmaticStreamSerializationAllowed = (pdl_enabled() || pdl_once()) ? 1 : 0;
+  pdl_once() = false;
   cfg.attrs = attr;
   cfg.numAttrs = 1;
   CK(cudaLaunchKernelEx(&cfg, kern, std::forward<Args>(args)...));

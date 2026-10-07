@@ -33,6 +33,12 @@ void sum_norm_rows(float* x, const float* partial, int n, int M, const PfExchang
 
 // y = bf16(x), n values (n even).
 void to_bf16(const float* x, __nv_bfloat16* y, size_t n, cudaStream_t s);
+// q8 wire rows (n int8 values + n / 32 fp16 scales per row) of partial (+ ef unless first); ef keeps the rounding
+// error (error feedback; may be null). M rows of n = 5120.
+void to_q8_wire(const float* partial, float* ef, bool first, uint8_t* wire, int n, int M, cudaStream_t s);
+// x += dequant(own) + dequant(recv) (q8 wire rows), then RMSNorm(x) * w -> h (may be null), q8_1 and per-16 sums.
+void add_norm_rows_q8(float* x, const uint8_t* own, const uint8_t* recv, int n, int M, const float* w, float eps, float* h,
+                      int8_t* xq, float* xd, float* xs, cudaStream_t s);
 // *dst = (*src == 0 ? 1 : 0)
 void flip_plane_to(int* dst, const int* src, cudaStream_t s);
 // x += bf16(partial) + recv (recv = the other card's BF16 partial; null: x += partial), then RMSNorm(x) * w ->

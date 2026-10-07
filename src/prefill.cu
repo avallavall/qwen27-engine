@@ -5,6 +5,7 @@
 #include "prefill.h"
 #include "common.cuh"
 
+#include <algorithm>
 #include <cfloat>
 
 namespace q27 {
@@ -68,6 +69,68 @@ __global__ void __launch_bounds__(256) bf16_pair_gemm_kernel(const __nv_bfloat16
     if (r < N) ya[(size_t)(t0 + t) * N + r] = acc[j];
     else yb[(size_t)(t0 + t) * N + r - N] = acc[j];
   }
+}
+
+// Same product, split over K for parallelism: grid (M / 64, K / BF2_KS); block = 64 tokens x 48 rows of one K slice,
+// thread = 4 tokens x 3 rows. Partials [K / BF2_KS][M][2N] are added in slice order by bf16_pair_reduce_kernel.
+constexpr int BF2_T = 64, BF2_R = 48, BF2_KC = 32, BF2_KS = 512;
+__global__ void __launch_bounds__(256) bf16_pair_splitk_kernel(const __nv_bfloat16* __restrict__ Wa, const __nv_bfloat16* __restrict__ Wb,
+                                                               const float* __restrict__ x, float* __restrict__ part, int N, int K,
+                                                               int M) {
+  pdl_wait();
+  pdl_trigger();
+  __shared__ __align__(16) float sx[BF2_KC][BF2_T];
+  __shared__ float sw[BF2_KC][BF2_R];
+  const int t0 = blockIdx.x * BF2_T, kbeg = blockIdx.y * BF2_KS;
+  const int tid = threadIdx.x, tg = tid & 15, rg = tid >> 4;  // tokens 4tg..4tg+3, rows 3rg..3rg+2
+  float acc[4][3];
+#pragma unroll
+  for (int i = 0; i < 4; i++) acc[i][0] = acc[i][1] = acc[i][2] = 0.f;
+  for (int k0 = kbeg; k0 < kbeg + BF2_KS; k0 += BF2_KC) {
+    __syncthreads();
+#pragma unroll
+    for (int j = 0; j < BF2_T * BF2_KC / 256; j++) {
+      const int i = tid + j * 256, t = i / BF2_KC, k = i % BF2_KC;
+      sx[k][t] = t0 + t < M ? x[(size_t)(t0 + t) * K + k0 + k] : 0.f;
+    }
+#pragma unroll
+    for (int j = 0; j < BF2_R * BF2_KC / 256; j++) {
+      const int i = tid + j * 256, r = i / BF2_KC, k = i % BF2_KC;
+      sw[k][r] = r < 2 * N ? __bfloat162float(r < N ? Wa[(size_t)r * K + k0 + k] : Wb[(size_t)(r - N) * K + k0 + k]) : 0.f;
+    }
+    __syncthreads();
+#pragma unroll 8
+    for (int k = 0; k < BF2_KC; k++) {
+      const float4 xv = *(const float4*)&sx[k][4 * tg];
+      const float w0 = sw[k][3 * rg], w1 = sw[k][3 * rg + 1], w2 = sw[k][3 * rg + 2];
+      const float xs[4] = {xv.x, xv.y, xv.z, xv.w};
+#pragma unroll
+      for (int i = 0; i < 4; i++) { acc[i][0] += w0 * xs[i]; acc[i][1] += w1 * xs[i]; acc[i][2] += w2 * xs[i]; }
+    }
+  }
+  float* p = part + (size_t)blockIdx.y * M * (2 * N);
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    const int t = t0 + 4 * tg + i;
+    if (t >= M) continue;
+#pragma unroll
+    for (int j = 0; j < 3; j++) {
+      const int r = 3 * rg + j;
+      if (r < 2 * N) p[(size_t)t * (2 * N) + r] = acc[i][j];
+    }
+  }
+}
+__global__ void bf16_pair_reduce_kernel(const float* __restrict__ part, int nks, float* __restrict__ ya, float* __restrict__ yb,
+                                        int N, int M) {
+  pdl_wait();
+  pdl_trigger();
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= M * 2 * N) return;
+  float s = 0.f;
+  for (int k = 0; k < nks; k++) s += part[(size_t)k * M * (2 * N) + i];
+  const int t = i / (2 * N), r = i % (2 * N);
+  if (r < N) ya[(size_t)t * N + r] = s;
+  else yb[(size_t)t * N + r - N] = s;
 }
 
 // ---------------------------------------------------------------- GDN input stage over M tokens
@@ -281,6 +344,70 @@ __global__ void to_bf16_kernel(const float* __restrict__ x, __nv_bfloat16* __res
   }
 }
 
+// q8 wire (prefill): y = partial (+ ef unless first); int8 per value and fp16 scale per 32 -> wire row r at
+// wire + r * (n + n / 16): n int8 values, then n / 32 scales; ef = y - dequant (error feedback, may be null).
+// Block per row, 1024 threads, same rounding as the decode q8 wire (sum_norm_q8_kernel).
+__global__ void __launch_bounds__(1024) to_q8_wire_kernel(const float* __restrict__ partial, float* __restrict__ ef, int first,
+                                                          uint8_t* __restrict__ wire, int n, int qb) {
+  pdl_wait();
+  pdl_trigger();
+  const size_t r = blockIdx.x;
+  int8_t* q8 = (int8_t*)wire + r * (n + 2 * n / qb);
+  __half* sc = (__half*)(wire + r * (n + 2 * n / qb) + n);
+#pragma unroll
+  for (int k = 0; k < SNR_NPT; k++) {
+    const int i = threadIdx.x + k * 1024;
+    const float y = ef && !first ? partial[r * n + i] + ef[r * n + i] : partial[r * n + i];
+    float amax = fabsf(y);
+    for (int o = qb / 2; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
+    const __half dh = __float2half(amax / 127.0f);
+    const int q = amax == 0.0f ? 0 : (int)roundf(y / (amax / 127.0f));
+    q8[i] = (int8_t)q;
+    if ((threadIdx.x & (qb - 1)) == 0) sc[i / qb] = dh;
+    if (ef) ef[r * n + i] = y - __half2float(dh) * (float)q;
+  }
+}
+
+// x += dequant(own) + dequant(recv) (both q8 wire rows), then RMSNorm + q8_1 per row (as add_norm_rows_kernel).
+__global__ void __launch_bounds__(1024) add_norm_rows_q8_kernel(float* __restrict__ x, const uint8_t* __restrict__ own,
+                                                                const uint8_t* __restrict__ recv, const float* __restrict__ w,
+                                                                float eps, float* __restrict__ h, int8_t* __restrict__ xq,
+                                                                float* __restrict__ xd, float* __restrict__ xs, int n, int qb) {
+  pdl_wait();
+  pdl_trigger();
+  __shared__ float red[32];
+  const size_t r = blockIdx.x;
+  float* xr = x + r * n;
+  const size_t rb = (size_t)n + 2 * n / qb;
+  const int8_t* oq = (const int8_t*)own + r * rb;
+  const __half* os = (const __half*)(own + r * rb + n);
+  const int8_t* rq = (const int8_t*)recv + r * rb;
+  const __half* rs = (const __half*)(recv + r * rb + n);
+  float v[SNR_NPT];
+#pragma unroll
+  for (int k = 0; k < SNR_NPT; k++) {
+    const int i = threadIdx.x + k * 1024;
+    v[k] = xr[i] + (__half2float(os[i / qb]) * (float)oq[i] + __half2float(rs[i / qb]) * (float)rq[i]);
+    xr[i] = v[k];
+  }
+  float t = 0.f;
+#pragma unroll
+  for (int k = 0; k < SNR_NPT; k++) t += v[k] * v[k];
+  t = warp_sum(t);
+  if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = t;
+  __syncthreads();
+  t = red[threadIdx.x & 31];
+  t = warp_sum(t);
+  const float scale = rsqrtf(t / n + eps);
+#pragma unroll
+  for (int k = 0; k < SNR_NPT; k++) {
+    const int i = threadIdx.x + k * 1024;
+    const float y = scale * v[k] * w[i];
+    if (h) h[r * n + i] = y;
+    q8_store(y, xq, xd, r * n + i, xs);
+  }
+}
+
 __global__ void flip_plane_to_kernel(int* dst, const int* src) {
   pdl_wait();
   pdl_trigger();
@@ -329,6 +456,18 @@ __global__ void __launch_bounds__(1024) add_norm_rows_kernel(float* __restrict__
 
 void bf16_pair_gemm(const __nv_bfloat16* Wa, const __nv_bfloat16* Wb, const float* x, float* ya, float* yb, int N, int K, int M,
                     cudaStream_t s) {
+  static const bool old = [] { const char* e = getenv("Q27_BF16_OLD"); return e && e[0] == '1'; }();
+  if (!old && 2 * N <= BF2_R && K % BF2_KS == 0) {
+    static float* part[16] = {};
+    static size_t part_n[16] = {};
+    int dev; CK(cudaGetDevice(&dev));
+    const int nks = K / BF2_KS;
+    const size_t need = (size_t)nks * std::max(M, 2048) * 2 * N;  // sized once for batches up to 2048 rows
+    if (need > part_n[dev]) { if (part[dev]) CK(cudaFree(part[dev])); CK(cudaMalloc(&part[dev], need * 4)); part_n[dev] = need; }
+    launch_k(bf16_pair_splitk_kernel, dim3((M + BF2_T - 1) / BF2_T, nks), 256, 0, s, Wa, Wb, x, part[dev], N, K, M);
+    launch_k(bf16_pair_reduce_kernel, (M * 2 * N + 255) / 256, 256, 0, s, (const float*)part[dev], nks, ya, yb, N, M);
+    return;
+  }
   if (K % BF_K || 2 * N * BF_T > 8 * 256) throw std::runtime_error("bf16_pair_gemm: bad shape");
   const size_t smem = sizeof(float) * (BF_T + 2 * N) * (BF_K + 1);
   static bool init[16] = {};
@@ -363,6 +502,15 @@ void sum_norm_rows(float* x, const float* partial, int n, int M, const PfExchang
 
 void to_bf16(const float* x, __nv_bfloat16* y, size_t n, cudaStream_t s) {
   launch_k(to_bf16_kernel, 64, 256, 0, s, x, y, n);
+}
+void to_q8_wire(const float* partial, float* ef, bool first, uint8_t* wire, int n, int M, cudaStream_t s) {
+  if (n != SNR_NPT * 1024) throw std::runtime_error("to_q8_wire: n must be 5120");
+  launch_k(to_q8_wire_kernel, M, 1024, 0, s, partial, ef, first ? 1 : 0, wire, n, wire_qb());
+}
+void add_norm_rows_q8(float* x, const uint8_t* own, const uint8_t* recv, int n, int M, const float* w, float eps, float* h,
+                      int8_t* xq, float* xd, float* xs, cudaStream_t s) {
+  if (n != SNR_NPT * 1024) throw std::runtime_error("add_norm_rows_q8: n must be 5120");
+  launch_k(add_norm_rows_q8_kernel, M, 1024, 0, s, x, own, recv, w, eps, h, xq, xd, xs, n, wire_qb());
 }
 void flip_plane_to(int* dst, const int* src, cudaStream_t s) { launch_k(flip_plane_to_kernel, 1, 1, 0, s, dst, src); }
 void add_norm_rows(float* x, const float* partial, const __nv_bfloat16* recv, int n, int M, const float* w, float eps, float* h,

@@ -67,8 +67,9 @@ void attn_decode(const float* qn, const float* qg, const void* kcache, const voi
                  const int* pos0, int T, float kq_scale, int nqh, int nkvh, int n_ctx, bool q8, cudaStream_t s);
 // Prefill: M query tokens at positions *pos0 .. *pos0+M-1 (their K/V already in the cache), causal.
 // o [M][nqh][256] f32 (gate applied). P V accumulates in f16 with llama.cpp's max offset (as its prefill FA).
+// depth_hint (host copy of *pos0, or -1): lets the int8 kernel split long position ranges over more CTAs.
 void attn_prefill(const float* qn, const float* qg, const void* kcache, const void* vcache, float* o, const int* pos0, int M,
-                  float kq_scale, int nqh, int nkvh, int n_ctx, bool q8, cudaStream_t s);
+                  float kq_scale, int nqh, int nkvh, int n_ctx, bool q8, cudaStream_t s, int depth_hint = -1);
 // Same result with a simple slow kernel (tests only).
 void attn_decode_ref(const float* qn, const float* qg, const void* kcache, const void* vcache, float* o, const int* pos0,
                      int T, float kq_scale, int nqh, int nkvh, int n_ctx, bool q8, cudaStream_t s);
@@ -85,6 +86,11 @@ struct ArArgs {
   const int* dstep = nullptr;
   int n_ar = 0, index = 0;
   int* err = nullptr;
+  // q8 wire only: error feedback. ef [rows][n] keeps this card's rounding error of the last sum of the pass and is
+  // added to the next partial before rounding, so the error in x does not grow over the layers. ef_first: first sum
+  // of a pass (ef not read).
+  float* ef = nullptr;
+  int ef_first = 1;
 };
 // RMSNorm of `rows` rows (n = 5120) -> h (f32, may be null) and q8_1 (xq, xd).
 void rmsnorm_q8(const float* x, const float* w, float* h, int8_t* xq, float* xd, int n, int rows, float eps, cudaStream_t s,
@@ -105,6 +111,10 @@ void gdn_conv_l2(const float* x, const float* w, float* planes, const int* in_pl
                  float* beta, int H, cudaStream_t s, const void* pf = nullptr, size_t pf_bytes = 0);
 
 // ---- two cards
+// Wire format of the cross-card sums (Q27_WIRE): q8b16 (default: int8 + fp16 scale per 16 values, with error
+// feedback, 56% of the bf16 bytes), q8 (scale per 32; one 32k test position failed), or bf16 (as llama.cpp).
+bool wire_q8();
+int wire_qb();  // values per scale on the q8 wire: 32 (Q27_WIRE=q8), 16 (q8b16), 0 = bf16 wire
 // x += sum over both cards of `partial` (n floats), through mapped pinned host memory. Each card calls it
 // with its own slot and flags; flags are per block (stride 32 ints). token = (*dstep) * n_ar + index + 1.
 // err is incremented if the peer never arrives.

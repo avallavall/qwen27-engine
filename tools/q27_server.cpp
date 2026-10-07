@@ -750,8 +750,9 @@ int main(int argc, char** argv) try {
   int n_ctx = o.ctx;
   if (n_ctx <= 0) {
     constexpr size_t MiB = 1 << 20;
-    // card 0: 600 MB desktop growth + 300 MB checkpoint staging + 512 MB prefill; card 1: 1536 MB vision + 300 + 512
-    const std::vector<size_t> reserve = {(512 + 300 + 600) * MiB, (512 + 300 + 1536) * MiB};
+    // card 0: 600 MB desktop growth + 300 MB checkpoint staging + 1100 MB prefill (2048-token batches);
+    // card 1: 1536 MB vision + 300 + 1100
+    const std::vector<size_t> reserve = {(1100 + 300 + 600) * MiB, (1100 + 300 + 1536) * MiB};
     n_ctx = Decoder::fit_ctx(model, reserve, q8);
   }
   n_ctx = std::min(n_ctx, model.hp().ctx_train);

@@ -6,6 +6,7 @@
 #include "quant_tables.h"
 #include "qtypes.cuh"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -683,6 +684,7 @@ __global__ void __launch_bounds__(NWARPS * 32) gemv_kernel(MatArgs m, const int8
 #pragma unroll
     for (int i = 0; i < 8 * NC; i++) acc[i] = 0.f;
 
+#pragma unroll 2
     for (int b0 = b_beg; b0 < b_end; b0 += 4) {
       const int b = b0 + lb;
       if (b >= b_end) continue;
@@ -730,10 +732,13 @@ __global__ void __launch_bounds__(NWARPS * 32) gemv_kernel(MatArgs m, const int8
 
 // Per-device scratch for split rows.
 struct Workspace { float* partial = nullptr; size_t partial_n = 0; unsigned* counters = nullptr; size_t counters_n = 0; };
-Workspace& workspace() {
-  static Workspace ws[16];
+// One per (device, stream): GEMVs on parallel graph branches must not share the partial sums and counters.
+Workspace& workspace(cudaStream_t s) {
+  static std::vector<std::pair<cudaStream_t, Workspace*>> ws[16];
   int dev; CK(cudaGetDevice(&dev));
-  return ws[dev];
+  for (auto& e : ws[dev]) if (e.first == s) return *e.second;
+  ws[dev].push_back({s, new Workspace()});
+  return *ws[dev].back().second;
 }
 
 // Split rows only when the tiles alone give fewer than `want` warps of work.
@@ -760,7 +765,7 @@ void launch(const QMat& m, const int8_t* xq, const float* xd, float* y, cudaStre
   MatArgs a{m.f[0], m.f[1], m.f[2], m.f[3], m.d, m.N, m.K, m.nb, m.ntiles, 1, 0, nullptr, nullptr};
   choose_split(m.ntiles, m.nb, 2 * resident * NWARPS, a.ks, a.seg_nb);
   if (a.ks > 1) {
-    Workspace& ws = workspace();
+    Workspace& ws = workspace(s);
     const size_t need = (size_t)a.ks * m.N * NC;
     if (need > ws.partial_n) { if (ws.partial) cudaFree(ws.partial); CK(cudaMalloc(&ws.partial, need * 4)); ws.partial_n = need; }
     if ((size_t)m.ntiles > ws.counters_n) {

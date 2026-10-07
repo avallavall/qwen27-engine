@@ -203,6 +203,7 @@ class Decoder {
     std::vector<float*> conv_st, ssm_st;  // per GDN layer, 4 planes each
     float *x, *h, *m_out, *qkv, *z, *ab, *g, *beta, *conv, *o, *y, *qg, *k, *v, *qn, *fg, *fu, *act, *logits;
     float *hfin, *hrows, *mtp_h, *pend_h, *cat;
+    float* ef;         // q8 wire error feedback [kMaxT][n_embd]
     int8_t* xq;
     float* xd;
     int* dtok;         // device: tokens [kMaxT]
@@ -215,6 +216,9 @@ class Decoder {
     CandRow* pc;       // device: target candidates [4]
     CandRow* qc;       // device: draft candidates [kDrafts]
     cudaGraphExec_t graph[kKinds] = {};
+    cudaStream_t s2 = nullptr;                       // second branch for independent GEMVs (Q27_BRANCH)
+    cudaEvent_t ev_fork = nullptr, ev_join = nullptr;
+    int prof_a[kKinds] = {}, prof_b[kKinds] = {};  // time-stamp slots of each captured graph (Q27_PROF)
   };
   // Prefill buffers per card, for up to pmb_ tokens.
   struct PRank {
@@ -228,7 +232,8 @@ class Decoder {
     // overlapped exchanges (prefill_batch_ov)
     cudaStream_t sx = nullptr;          // copy-engine stream
     cudaEvent_t ev_part[2] = {}, ev_recv[2] = {};
-    __nv_bfloat16 *sendbuf = nullptr, *recvbuf = nullptr;  // [pmb][5120]
+    __nv_bfloat16 *sendbuf = nullptr, *recvbuf = nullptr;  // [pmb][5120] (q8 wire: rows of 5440 bytes)
+    float* ef = nullptr;                // [pmb][5120] q8 wire error feedback
     int* dpos2 = nullptr;               // device: positions of the two halves
     int* dplane2 = nullptr;             // device: GDN plane half B reads
     int* rope = nullptr;                // device [pmb][3]: IMRoPE positions of the batch rows (when rope_on_)
@@ -261,7 +266,7 @@ class Decoder {
   static constexpr int kNex = 160;
 
   std::vector<PRank> pr_;
-  int pmb_ = 512;
+  int pmb_ = 2048;  // prompt batch (Q27_PREFILL_BATCH); 2048: +18% prompt t/s against 512, +546 MB per card
   int last_n_ = 0;                  // tokens emitted by the last start / spec_step (0 after other passes)
   int rope_delta_ = 0;
   const int* batch_rope_ = nullptr;  // host rope3 rows of the current prefill batch (or null)
@@ -281,7 +286,7 @@ class Decoder {
   void prefill_alloc();
   void pf2_alloc();
   void pf2_part(int ri, int p, const PfHalf& hv);
-  void pf2_send(int ri, const PfHalf& hv);
+  void pf2_send(int ri, const PfHalf& hv, int p);
   void pf2_norm(int ri, int p, const PfHalf& hv);
   void prefill_batch_ov(const int* tokens, int M, bool last, bool all_logits);
   void prefill_batch(const int* tokens, int M, bool last, bool all_logits, bool exchange);
@@ -303,6 +308,13 @@ class Decoder {
   void sum_norm(int ri, const float* partial, int T, int& ix, bool with_sums, const float* w, float* h, const QMat* next);
   void candidates(int ri, const float* logits, int rows, bool draft, CandRow* out, int& ix, bool with_sums);
   void upload_inputs(Rank& R);
+  std::string ph_;                    // label prefix of the time stamps (Q27_PROF)
+  bool ef_first_ = true;              // the next decode sum is the first of its pass (q8 wire error feedback)
+  void mk(int ri, const char* what);  // time stamp (Q27_PROF=1 only)
+  // Parallel branch: fork() makes s2 wait for the work queued on s so far; join() makes s wait for s2. Without
+  // Q27_BRANCH (default on) both return the main stream and do nothing.
+  cudaStream_t fork(int ri);
+  void join(int ri);
 };
 
 }  // namespace q27
