@@ -47,47 +47,55 @@ project is in [PLAN.md](../PLAN.md).
 
 ## Results against llama.cpp
 
-Three runs of the same head-to-head script. "2026-10-06" is the engine's first complete version, "2026-10-07" the
-current one. Both engine runs use the engine's default q8_0 KV cache; llama.cpp uses an f16 cache. The next
-section repeats the run with an f16 cache in the engine.
+Four runs of the same head-to-head script. The engine columns are the first complete version (2026-10-06), the
+second speed round and the third (current) round, all on 2026-10-06/07. llama.cpp was measured again together with
+the third round (2026-10-07, quiet desktop, memory overclock on both cards); its earlier run gave the same numbers
+within 1-2%. All engine runs use the default q8_0 KV cache; llama.cpp uses an f16 cache. The next section repeats
+the second-round run with an f16 cache in the engine.
 
-| Test | llama.cpp | Engine 2026-10-06 | Engine 2026-10-07 | Now vs llama.cpp |
-|---|---|---|---|---|
-| Decode step at 1k context, ms | 37.1 | 24.2 | **22.5** | 1.65x |
-| Decode step at 30k, ms | 40.4 | 26.4 | **24.3** | 1.66x |
-| Decode step at 100k, ms | 47.6 | 30.6 | **28.6** | 1.66x |
-| Decode step at 150k, ms | 53.3 | 34.3 | **31.9** | 1.67x |
-| Generation at 1k, tok/s | 76 | 117 | **122** | 1.60x |
-| Generation at 30k, tok/s | 70 | 106 | **115** | 1.65x |
-| Generation at 100k, tok/s | 57 | 90 | **99** | 1.73x |
-| Generation at 150k, tok/s | 52 | 83 | **84** | 1.61x |
-| Prompt reading to 1k, tok/s | 517 | 655 | **1,245** | 2.41x |
-| Prompt reading to 30k, tok/s | 664 | 789 | **1,507** | 2.27x |
-| Prompt reading 30k → 100k, tok/s | 534 | 645 | **1,249** | 2.34x |
-| Prompt reading 100k → 150k, tok/s | 427 | 495 | **974** | 2.28x |
-| Resent 1k prompt, time to first token, ms | 181 | 65 | **61** | 2.96x |
-| Resent 150k prompt, time to first token, ms | 682 | 82 | **78** | 8.76x |
-| Image 800 x 600 (1,036 tokens), total s | 3.75 | 2.77 | **2.03** | 1.85x |
-| Image 3840 x 2160 (4,099 tokens), total s | 12.53 | 7.27 | **5.24** | 2.39x |
-| Qwen Code session replay, total s | 93.4 | 73.9 | **48.6** | 1.92x |
-| ... of which prompt reading, s | 55.2 | 47.3 | **25.9** | 2.13x |
-| VRAM per card at the end, GB | 14.5 + 15.4 | 10.9 + 11.3 | 11.5 + 11.9 | |
-| Load time, s | 8.3 | 10.1 | 10.3 | |
+| Test | llama.cpp | Engine, first | Engine, round 2 | Engine, round 3 | Now vs llama.cpp |
+|---|---|---|---|---|---|
+| Decode step at 1k context, ms | 37.1 | 24.2 | 22.5 | **20.9** | 1.78x |
+| Decode step at 30k, ms | 39.9 | 26.4 | 24.3 | **22.9** | 1.74x |
+| Decode step at 100k, ms | 47.8 | 30.6 | 28.6 | **27.3** | 1.75x |
+| Decode step at 150k, ms | 52.4 | 34.3 | 31.9 | **30.5** | 1.72x |
+| Generation at 1k, tok/s | 76 | 117 | 122 | **133** | 1.74x |
+| Generation at 30k, tok/s | 71 | 106 | 115 | **124** | 1.75x |
+| Generation at 100k, tok/s | 56 | 90 | 99 | **104** | 1.85x |
+| Generation at 150k, tok/s | 52 | 83 | 84 | **93** | 1.77x |
+| Prompt reading to 1k, tok/s | 523 | 655 | 1,245 | **1,255** | 2.40x |
+| Prompt reading to 30k, tok/s | 664 | 789 | 1,507 | **1,522** | 2.29x |
+| Prompt reading 30k → 100k, tok/s | 535 | 645 | 1,249 | **1,214** | 2.27x |
+| Prompt reading 100k → 150k, tok/s | 426 | 495 | 974 | **967** | 2.27x |
+| Resent 1k prompt, time to first token, ms | 175 | 65 | 61 | **38** | 4.6x |
+| Resent 150k prompt, time to first token, ms | 670 | 82 | 78 | **55** | 12.2x |
+| Image 800 x 600 (1,036 tokens), total s | 3.78 | 2.77 | 2.03 | **2.41** | 1.56x |
+| Image 3840 x 2160 (4,099 tokens), total s | 12.68 | 7.27 | 5.24 | **4.93** | 2.57x |
+| Qwen Code session replay, total s | 90.3 | 73.9 | 48.6 | **46.6** | 1.94x |
+| ... of which prompt reading, s | 55.2 | 47.3 | 25.9 | **26.5** | 2.08x |
+| VRAM per card at the end, GB | 15.2 + 15.4 | 10.9 + 11.3 | 11.5 + 11.9 | 12.5 + 12.3 | |
+| Load time, s | 9.0 | 10.1 | 10.3 | 13.1 | |
 
 Notes:
 
-- Draft acceptance was 0.57-0.62 in all runs. At 150k the current run had the lowest acceptance (0.565 against
-  0.613 before), so its tok/s gain is smaller than its step-time gain.
-- At 100k llama.cpp reused 29k tokens from its cache and read 70,986 tokens; the engine read 83,467 (its periodic
-  checkpoints are every 16,384 tokens). The rate is per token read.
+- Draft acceptance was 0.57-0.62 in all runs (round 3: 0.594-0.614, llama.cpp 0.572-0.619). The decode step time
+  does not depend on it; tok/s does.
+- The resent prompts start 23 ms sooner than in round 2: the restore point is the last checkpoint, which now comes
+  from the VRAM staging buffer.
+- The small-image mean includes a one-time 1.3 s cost in its first run: that request pushed the 150k conversation
+  out of the cards, and the server copied it to RAM first. The other two runs took 1.9 and 2.0 s, as in round 2.
+- At 100k llama.cpp reused 29k tokens from its cache and read 70,986 tokens; the engine read 70,667. The rate is
+  per token read.
 - In the agent replay both engines read the same 34.6k of 212.6k prompt tokens; the rest came from the prompt
   cache.
-- The current engine uses 0.6 GB more VRAM per card than the first version because prompt batches grew from 512
-  to 2048 tokens.
+- VRAM: card 0's number includes the desktop. Round 3 keeps a copy of the token embedding on each card (+0.4 GB).
+- Load time is measured from the start script to the first good `/health`. In round 3 the background
+  re-quantization of the MTP block slowed the load; a fix after the benchmark brought the engine's own count from
+  10.5 s to 9.6 s (9.4 s without the re-quantization).
 
 ### Like for like: both engines with an f16 KV cache
 
-The same head-to-head with `Q27_KV=f16` in the engine (`bench\out\cmp_q27v2_f16.json`). With an f16 cache, prompt
+Second round (2026-10-07), the same head-to-head with `Q27_KV=f16` in the engine (`bench\out\cmp_q27v2_f16.json`). With an f16 cache, prompt
 attention also uses the f16 Q K^T path, as llama.cpp does.
 
 | Test | llama.cpp, f16 KV | Engine, f16 KV | Engine, q8_0 KV (default) | f16 vs llama.cpp |

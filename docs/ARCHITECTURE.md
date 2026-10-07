@@ -261,7 +261,7 @@ With the server defaults (q8_0 KV, prompt batches of 2048, vision on):
 | GDN state, 4 planes | 0.3 GB | 0.3 GB |
 | Prompt buffers (2048-token batch) | about 0.7 GB | about 0.7 GB |
 | Vision encoder and image buffers | | about 1.2 GB |
-| Measured total after a 150k prompt and 4K images | 12.9 GB | 13.4 GB |
+| Measured total after a 150k prompt and 4K images (second round; the embedding copy adds 0.4 GB per card) | 12.9 GB | 13.4 GB |
 
 ## Runtime switches
 

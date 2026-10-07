@@ -47,6 +47,16 @@ int8 Q K^T, and prompt batches of 2048 tokens. Head-to-head against llama.cpp at
 Code session 1.92x (was 1.26x). The logit tests stay inside the limits. The list of changes and their measured
 effects is in [docs/PERFORMANCE.md](docs/PERFORMANCE.md#optimization-history).
 
+**2026-10-07: third speed round and Linux build.** The engine builds and passes every check under Linux (WSL2,
+Ubuntu 24.04), with the same logits as on Windows. Speed changes: the token embedding in each card's VRAM, the MTP
+drafter re-quantized to Q4_K at load, block verification of the drafts (exact), the L2 prefetch of each cross-card
+sum moved to separate blocks (found with new timers inside the sum kernel), and the last checkpoint restored from
+VRAM. Measured and not done: shorter or longer draft chains, a device-side step loop, 4096-token prompt batches,
+and two GEMV changes suggested by Nsight Compute. Head-to-head against llama.cpp measured again the same day with a
+quiet desktop: decode steps 1.72-1.78x faster (20.9 / 22.9 / 27.3 / 30.5 ms at 1k / 30k / 100k / 150k), prompt
+reading 2.27-2.40x, resent prompts 4.6-12.2x sooner to the first token, the Qwen Code replay 1.94x. Details in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md#third-round-2026-10-07).
+
 ## Phase 0 result: where the time goes, and the floor
 
 Measured 2026-10-05 on this rig with the production build (`qwen38_27\bin-parches`) and
@@ -506,3 +516,23 @@ Head-to-head again at 180,224 context (`bench\compare.py q27v2`, results `bench\
 `bench\out\compare_report_v2.md`), with the final build. The tables with all three runs (llama.cpp, first version,
 second round), the accuracy results, the time split and the link measurements are in
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+### Third speed round (2026-10-07)
+
+Head-to-head at 180,224 context with a quiet desktop, llama.cpp measured again (`bench\compare.py llama_r3` and
+`q27_r3`, log `bench\out\final_r3.log`, results `bench\out\cmp_llama_r3.json`, `cmp_q27_r3.json`):
+
+| | 1k | 30k | 100k | 150k |
+|---|---|---|---|---|
+| Decode ms per step, engine | 20.9 | 22.9 | 27.3 | 30.5 |
+| Decode ms per step, llama.cpp | 37.1 | 39.9 | 47.8 | 52.4 |
+| Generation tok/s, engine / llama.cpp | 132.8 / 76.3 | 123.7 / 70.6 | 104.2 / 56.3 | 92.6 / 52.4 |
+| Prompt t/s (first run), engine / llama.cpp | 1255 / 523 | 1522 / 664 | 1214 / 535 | 967 / 426 |
+| Resent prompt, time to first token, ms | 38 / 175 | 41 / 276 | 49 / 510 | 55 / 670 |
+
+- Images: 800 x 600 2.41 s (1.9-2.0 s without a one-time move of the 150k conversation to RAM; llama.cpp 3.78 s),
+  4K 4.93 s (llama.cpp 12.68 s). Qwen Code replay 46.6 s (llama.cpp 90.3 s).
+- VRAM at the end 12,530 + 12,268 MiB (llama.cpp 15,214 + 15,424). Load 9.6 s by the engine's own count after the
+  load-order fix (13.1 s to /health in the run, before the fix).
+- Changes, kernel timers, Nsight Compute findings and what was measured and not done: HANDOFF section H and
+  [docs/PERFORMANCE.md](docs/PERFORMANCE.md).

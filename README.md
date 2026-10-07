@@ -6,7 +6,7 @@ calls, reasoning, image input and speculative decoding. Coding agents such as Qw
 `llama-server`.
 
 General engines support many models and many GPUs. This one supports one model on one rig, and every kernel is
-written for that case. On the same PC it decodes 1.4-1.7x faster than a tuned llama.cpp build (depending on the
+written for that case. On the same PC it decodes 1.4-1.8x faster than a tuned llama.cpp build (depending on the
 context length and the KV cache type), reads prompts 1.7-2.4x faster, and replays a recorded coding-agent session
 in half the time. Its output distribution stays as close to llama.cpp's as llama.cpp's own batch mode is to its
 one-token mode.
@@ -34,23 +34,24 @@ attention and an f16 KV cache. The engine runs with its defaults, including a q8
 
 | Test | llama.cpp | qwen27-engine | Gain |
 |---|---|---|---|
-| Decode step at 1k / 30k / 100k / 150k context, ms | 37.1 / 40.4 / 47.6 / 53.3 | 22.5 / 24.3 / 28.6 / 31.9 | 1.65-1.67x |
-| Generation at the same depths, tok/s | 76 / 70 / 57 / 52 | 122 / 115 / 99 / 84 | 1.60-1.73x |
-| Prompt reading to the same depths, tok/s | 517 / 664 / 534 / 427 | 1245 / 1507 / 1249 / 974 | 2.27-2.41x |
-| Resent prompt, time to the first token (1k → 150k) | 181 → 682 ms | 61 → 78 ms | 3.0-8.8x |
-| Image 800 x 600 (1,036 tokens), total | 3.75 s | 2.03 s | 1.85x |
-| Image 3840 x 2160 (4,099 tokens), total | 12.5 s | 5.2 s | 2.39x |
-| Replay of a real Qwen Code session (11 requests) | 93.4 s | 48.6 s | 1.92x |
-| VRAM per card at the end | 14.5 + 15.4 GB | 11.5 + 11.9 GB | |
-| Load time | 8.3 s | 10.3 s | |
+| Decode step at 1k / 30k / 100k / 150k context, ms | 37.1 / 39.9 / 47.8 / 52.4 | 20.9 / 22.9 / 27.3 / 30.5 | 1.72-1.78x |
+| Generation at the same depths, tok/s | 76 / 71 / 56 / 52 | 133 / 124 / 104 / 93 | 1.74-1.85x |
+| Prompt reading to the same depths, tok/s | 523 / 664 / 535 / 426 | 1255 / 1522 / 1214 / 967 | 2.27-2.40x |
+| Resent prompt, time to the first token (1k → 150k) | 175 → 670 ms | 38 → 55 ms | 4.6-12.2x |
+| Image 800 x 600 (1,036 tokens), total | 3.78 s | 2.41 s | 1.56x |
+| Image 3840 x 2160 (4,099 tokens), total | 12.7 s | 4.9 s | 2.57x |
+| Replay of a real Qwen Code session (11 requests) | 90.3 s | 46.6 s | 1.94x |
+| VRAM per card at the end | 15.2 + 15.4 GB | 12.5 + 12.3 GB | |
+| Load time | 9.0 s | 9.6 s (own count; 13.1 s to /health in the run) | |
 
-A decode step verifies 3 drafted tokens and emits 2.7-2.8 tokens on average in both engines. Generation in tok/s
-depends on how many drafts the model accepts, which varies from run to run (0.57-0.62 here). The time per step
-does not, so it is the cleaner measure of speed.
+Measured 2026-10-07 (third speed round) with a quiet desktop. A decode step verifies 3 drafted tokens and emits
+about 3 tokens on average. Generation in tok/s depends on how many drafts the model accepts, which varies from run
+to run (0.57-0.62 here). The time per step does not, so it is the cleaner measure of speed. The small-image time
+includes a one-time 1.3 s move of the previous 150k conversation to RAM; without it the image takes 1.9-2.0 s.
 
-The KV cache types differ. With an f16 cache in both engines, the engine's decode steps are 1.43-1.63x faster
-(1.43x at 150k), prompt reading 1.73-2.34x faster, and the agent replay 1.89x faster. The q8_0 cache adds up to 15%
-decode speed at 150k context and halves the cache memory.
+The KV cache types differ. With an f16 cache in both engines (second round), the engine's decode steps were
+1.43-1.63x faster (1.43x at 150k), prompt reading 1.73-2.34x faster, and the agent replay 1.89x faster. The q8_0
+cache adds up to 15% decode speed at 150k context and halves the cache memory.
 
 Methods, the like-for-like table, the time split of a decode step and of a prompt batch, and the measured hardware
 limits are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
