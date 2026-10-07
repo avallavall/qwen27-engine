@@ -194,7 +194,7 @@ feedback) and was dropped.
 The image is decoded and resized exactly as llama.cpp does (the input tensor is bit-identical). The encoder uses
 BF16 tensor cores with f32 accumulation. Against llama.cpp's encoder (`mtmd`) the image embeddings have a mean
 cosine similarity of at least 0.99998 on six test images. The engine answers all six test questions about five
-test images correctly (`benchision_answers.py`).
+test images correctly (`bench\vision_answers.py`).
 
 ## Benchmark fairness
 
