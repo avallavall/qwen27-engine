@@ -71,6 +71,8 @@ struct Shard {
   QMat draft_out;
   int* draft_ids = nullptr;
   int draft_n = 0;
+  // Token embedding rows (IQ2_S): this card's VRAM copy, or the mapped host table with Q27_EMBD_HOST=1.
+  const uint8_t* embd = nullptr;
   size_t vram_bytes = 0;
   std::vector<void*> allocs;
 };
@@ -91,7 +93,7 @@ class Model {
   Hparams hp_;
   std::unique_ptr<GGUF> g_;
   std::vector<Shard> shards;
-  uint8_t* tok_embd = nullptr;  // raw IQ2_S rows in pinned, mapped host memory (read by both cards)
+  uint8_t* tok_embd = nullptr;  // Q27_EMBD_HOST=1 only: raw IQ2_S rows in pinned, mapped host memory (both cards)
   int64_t tok_embd_row_bytes = 0;
 
  private:

@@ -94,12 +94,15 @@ Model::Model(const std::string& path, const std::vector<int>& devices) {
   hp_.eps = (float)g.get_float("qwen35.attention.layer_norm_rms_epsilon");
   hp_.ctx_train = (int)g.get_int("qwen35.context_length");
 
-  // Embedding table: pinned host memory, mapped into every card (only one row is read per token).
+  // Embedding table (IQ2_S, 407 MB): a copy in each card's VRAM (load_shard). Q27_EMBD_HOST=1: one copy in pinned
+  // host memory, mapped into both cards (the old path; each row read crosses PCIe).
   const GTensor& te = g.tensor("token_embd.weight");
   if (te.type != GType::IQ2_S) throw std::runtime_error("token_embd: expected IQ2_S");
-  CK(cudaHostAlloc(&tok_embd, te.nbytes, cudaHostAllocMapped | cudaHostAllocPortable));
-  memcpy(tok_embd, te.data, te.nbytes);
   tok_embd_row_bytes = te.row_bytes();
+  if (const char* e = getenv("Q27_EMBD_HOST"); e && e[0] == '1') {
+    CK(cudaHostAlloc(&tok_embd, te.nbytes, cudaHostAllocMapped | cudaHostAllocPortable));
+    memcpy(tok_embd, te.data, te.nbytes);
+  }
 
   const int tp = (int)devices.size();
   shards.resize(tp);
@@ -162,6 +165,9 @@ void Model::load_shard(Shard& sh, int tp) {
   for (const auto& t : g_->tensors())
     if (qmat_supported(t.type)) L.scratch_bytes = std::max(L.scratch_bytes, (size_t)t.nbytes);
   CK(cudaMalloc(&L.scratch, L.scratch_bytes));
+
+  if (tok_embd) sh.embd = tok_embd;
+  else { const GTensor& te = g_->tensor("token_embd.weight"); sh.embd = (const uint8_t*)L.dev_copy(te.data, te.nbytes); }
 
   const int E = hp.n_embd;
   sh.layers.resize(hp.n_layer);
@@ -697,7 +703,7 @@ void Decoder::forward(int ri, int T, bool snaps, bool set_plane, int& ix, bool w
   const int E = hp.n_embd, D = hp.ssm_dim;
   const float eps = hp.eps;
   cudaStream_t s = R.s;
-  get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, R.dtok, T, R.x, E, s);
+  get_rows_iq2_s(R.sh->embd, m_.tok_embd_row_bytes, R.dtok, T, R.x, E, s);
   ef_first_ = true;
   if (unfused() & 1) { rmsnorm(R.x, sh.layers[0].attn_norm, R.h, E, T, eps, s); quantize_q8_1(R.h, R.xq, R.xd, E, T, s); }
   else rmsnorm_q8(R.x, sh.layers[0].attn_norm, R.h, R.xq, R.xd, E, T, eps, s);
@@ -755,7 +761,7 @@ void Decoder::mtp_forward(int ri, int T, bool logits, int& ix, bool with_sums) {
   const Hparams& hp = m_.hp();
   const int E = hp.n_embd;
   cudaStream_t s = R.s;
-  get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, R.dtok, T, R.x, E, s);
+  get_rows_iq2_s(R.sh->embd, m_.tok_embd_row_bytes, R.dtok, T, R.x, E, s);
   ef_first_ = true;
   rmsnorm(R.x, sh.enorm, R.cat, E, T, hp.eps, s, 2 * E);           // cat[t][0:E]   = enorm(e)
   rmsnorm(R.hrows, sh.hnorm, R.cat + E, E, T, hp.eps, s, 2 * E);   // cat[t][E:2E]  = hnorm(h)
@@ -1148,7 +1154,7 @@ void Decoder::pf_mtp(int ri, int M, bool exchange) {
   CK(cudaMemcpyAsync(P.hrows, R.pend_h, sizeof(float) * E, cudaMemcpyDeviceToDevice, s));
   if (M > 1) CK(cudaMemcpyAsync(P.hrows + E, P.hfin, sizeof(float) * (size_t)(M - 1) * E, cudaMemcpyDeviceToDevice, s));
   CK(cudaMemcpyAsync(R.pend_h, P.hfin + (size_t)(M - 1) * E, sizeof(float) * E, cudaMemcpyDeviceToDevice, s));
-  get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, P.tok, M, P.x, E, s, img_.empty() ? nullptr : img_[ri]);
+  get_rows_iq2_s(R.sh->embd, m_.tok_embd_row_bytes, P.tok, M, P.x, E, s, img_.empty() ? nullptr : img_[ri]);
   rmsnorm(P.x, sh.enorm, P.cat, E, M, eps, s, 2 * E);
   rmsnorm(P.hrows, sh.hnorm, P.cat + E, E, M, eps, s, 2 * E);
   quantize_q8_1(P.cat, P.xq, P.xd, 2 * E, M, s, P.xs);
@@ -1185,7 +1191,7 @@ void Decoder::prefill_batch(const int* tokens, int M, bool last, bool all_logits
     CK(cudaMemcpyAsync(P.tok, P.htok, sizeof(int) * M, cudaMemcpyHostToDevice, R.s));
     CK(cudaMemcpyAsync(R.dpos, P.htok + M, sizeof(int), cudaMemcpyHostToDevice, R.s));
     upload_rope(ri, M);
-    get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, P.tok, M, P.x, E, R.s, img_.empty() ? nullptr : img_[ri]);
+    get_rows_iq2_s(R.sh->embd, m_.tok_embd_row_bytes, P.tok, M, P.x, E, R.s, img_.empty() ? nullptr : img_[ri]);
     rmsnorm_q8(P.x, R.sh->layers[0].attn_norm, P.h, P.xq, P.xd, E, M, hp.eps, R.s, P.xs);
   }
   // Layer by layer on both cards, so the cross-card sums of one layer are queued on both before the next.
@@ -1449,7 +1455,7 @@ void Decoder::pf2_part(int ri, int p, const PfHalf& hv) {
     }
     float* x = P.x + r0 * E;
     float* cat = P.cat + r0 * 2 * E;
-    get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, P.tok + r0, Mh, x, E, s, img_.empty() ? nullptr : img_[ri]);
+    get_rows_iq2_s(R.sh->embd, m_.tok_embd_row_bytes, P.tok + r0, Mh, x, E, s, img_.empty() ? nullptr : img_[ri]);
     rmsnorm(x, sh.enorm, cat, E, Mh, eps, s, 2 * E);
     rmsnorm(hrows, sh.hnorm, cat + E, E, Mh, eps, s, 2 * E);
     quantize_q8_1(cat, xq, xd, 2 * E, Mh, s, xs);
@@ -1556,7 +1562,7 @@ void Decoder::prefill_batch_ov(const int* tokens, int M, bool last, bool all_log
     upload_rope(ri, M);
     ph_ = "P.";
     if (prof::on()) { prof::eager(true); mk(ri, "start"); }
-    get_rows_iq2_s(m_.tok_embd, m_.tok_embd_row_bytes, P.tok, M, P.x, E, R.s, img_.empty() ? nullptr : img_[ri]);
+    get_rows_iq2_s(R.sh->embd, m_.tok_embd_row_bytes, P.tok, M, P.x, E, R.s, img_.empty() ? nullptr : img_[ri]);
     for (int h = 0; h < 2; h++)
       rmsnorm_q8(P.x + (size_t)hv[ri][h].r0 * E, sh.layers[0].attn_norm, P.h + (size_t)hv[ri][h].r0 * E, hv[ri][h].xq, hv[ri][h].xd, E,
                  hv[ri][h].Mh, hp.eps, R.s, hv[ri][h].xs);
