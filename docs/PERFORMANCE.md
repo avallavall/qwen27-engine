@@ -24,7 +24,8 @@ project is in [PLAN.md](../PLAN.md).
 | Link | each card on PCIe 3.0 x4; no peer-to-peer access (GeForce on Windows) |
 | CPU, RAM | AMD Ryzen 5 9600X, 32 GB |
 | OS, toolchain | Windows 11, CUDA 13.4, MSVC 2022 |
-| Card 0 | also drives the desktop (about 0.8-1.6 GB in use, a few % of its time) |
+| Card 0 | also drives the desktop (about 0.8-1.6 GB in use); with a busy desktop its GEMVs run 8-10% slower than card 1's (see below) |
+| Memory clocks | until 2026-10-07 (second round) one card ran without its memory overclock; from the third round 14,651 / 14,451 MHz |
 | Model | `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf` (12.1 GB) with `mmproj-Qwen3.8-27B-BF16.gguf` |
 | llama.cpp | the production build of this PC: `-sm tensor`, MTP drafting (3 drafts, probabilistic), flash attention, f16 KV cache (`bench\run-llama.ps1`) |
 
@@ -112,19 +113,29 @@ measured cost, the long-context retrieval test, and the comparison with an f16 K
 
 ## Where the time goes
 
-### One decode step at 1k context (22.6 ms, card 1)
+### One decode step at 1k context (third round, 22.7 ms with time stamps)
 
-| Part | ms | Share | Floor |
+| Part | Card 0 (desktop) | Card 1 | Floor |
 |---|---|---|---|
-| Weight GEMVs of the 4-token verify pass (5.7 GB) | 15.2 | 67% | 13.2 ms at 430 GB/s |
-| Cross-card sums (128 per pass, about 27 µs each) | 3.5 | 15% | about 15 µs each on this link |
-| Other kernels of the pass (delta rule, attention, norms) | 1.1 | 5% | |
-| MTP catch-up and 3 drafts | 2.8 | 12% | |
-| Sampling and acceptance | 0.1 | <1% | |
+| Weight GEMVs of the 4-token verify pass (5.7 GB) | 16.1 ms | 14.9 ms | 12.7 ms at 450 GB/s |
+| Cross-card sums (128 per pass) | 3.1 ms | 4.4 ms | about 17 µs of link time each |
+| Other kernels of the pass (delta rule, attention, norms) | 1.2 ms | 1.1 ms | |
+| MTP catch-up and 3 drafts (Q4_K drafter) | 2.2 ms | 2.2 ms | |
+| Sampling and acceptance | 0.1 ms | 0.1 ms | |
 
-Two limits remain. The GEMVs reach about 385 GB/s on average against 430-440 GB/s possible. The cross-card sums
-cost 3.5 ms, of which roughly half is link time and half is latency and waiting for the slower card. Attention
-grows with the context: at 150k a step takes 9.4 ms more than at 1k.
+The two cards meet 128 times per step, so the slower card sets the pace. With a busy desktop (video, browsers) card
+0 runs the same GEMVs 8-10% slower than card 1 (`bench_gemv` alone: 337-346 against 374-376 GB/s at 4 columns),
+although its raw memory bandwidth is higher: Windows shares the card between the desktop and the engine. Card 1 then
+waits about 13 µs in each sum. Driving the monitor from another GPU would remove this (estimate: -1.2 ms per step).
+
+Inside a sum (`Q27_SUMPROF=1`, 4 rows, slower card): write the own partial 9.4 µs, flag and wait 2 µs, read the
+peer's partial 8 µs. The link moves about 46 KB per sum at about 2.7 GB/s and does not read and write at the same
+time faster than one direction. Attention grows with the context: at 150k a step takes about 9 ms more than at 1k.
+
+Nsight Compute on the GEMVs (`bench/ncu_gemv.sh`, 4 columns, cold caches): DRAM 76-89% busy, 155-168 registers per
+thread, so only 12 warps fit per SM; 46-70% of the stall samples wait on global loads. Two cheap fixes failed (an
+L2 prefetch two steps ahead in the loop, and a register cap for 16 warps per SM; see the history). A load path
+through shared memory with asynchronous copies would be the next step, for all 10 weight types.
 
 ### One prompt batch at 30k context (2048 tokens, card 1, 1.36 s)
 
@@ -139,10 +150,13 @@ grows with the context: at 150k a step takes 9.4 ms more than at 1k.
 With the exchange switched off (test switch `Q27_PF_NOEX=1`, wrong results) a batch takes 1.17 s, 14% less. Part
 of that cost is the wait above; the rest is copy-engine traffic that slows the GEMMs a little.
 
-The GEMMs reach 66-72 TOPS for IQ2_XXS, IQ3_XXS, IQ3_S and IQ4_XS, and 40-45 TOPS for Q2_K, Q4_K, Q6_K, IQ2_S,
-IQ2_XS and IQ1_M (`bench_gemm` at 1024 rows). The specified int8 tensor-core peak of the card is about 190 TOPS.
-A likely limit is the f32 work that applies the per-32-weight scales after every tensor-core instruction.
-Confirming it needs Nsight Compute, which requires the GPU performance-counter permission on this PC.
+The GEMMs reach 64-72 TOPS for IQ2_XXS, IQ3_XXS, IQ3_S and IQ4_XS, and 40-45 TOPS for Q2_K, Q4_K, Q6_K, IQ2_S,
+IQ2_XS and IQ1_M (`bench_gemm` at 2048 rows). The specified int8 tensor-core peak of the card is about 190 TOPS.
+Nsight Compute (5120 x 17408, 2048 rows) shows where the time goes: DRAM is 5-7% busy and the tensor pipe 20-44%;
+the rest is the work that unpacks the codebooks and applies the scales. IQ3_S: 56% of the issue slots busy, stalls
+spread over the math pipe, the shared-memory queue and barriers. Q4_K: 235 registers per thread, 17% occupancy,
+stalls on shared-memory results. The slower types hold about 8% of the weights; at IQ3_S speed prompt reading
+would gain about 3%.
 
 ## Hardware limits
 
@@ -150,7 +164,7 @@ Measured on this rig with `bench\hw.cu` and `tools\bench_link2.cu`:
 
 | Quantity | Card 0 | Card 1 |
 |---|---|---|
-| Memory read bandwidth, large stream | 431 GB/s | 440 GB/s |
+| Memory read bandwidth, large stream | 452 GB/s (431 before the memory overclock) | 448 GB/s (440) |
 | Kernel launch, outside / inside a CUDA graph | 7.0 / 1.6 µs | 7.0 / 1.6 µs |
 | Copy engine, device to host / host to device | 3.55 / 3.58 GB/s | 3.56 / 3.60 GB/s |
 
@@ -202,6 +216,33 @@ Tried and not kept:
 | int8 wire with one scale per 32 values | one test position reached KLD 0.43 |
 | Warp-per-head gated RMSNorm in prompt reading | one sensitive test position reached KLD 1.0 |
 | 16 warps per CTA for small prompt GEMMs | slower below 256 rows and for Q6_K |
+
+### Third round (2026-10-07)
+
+Measured with the time stamps, the new sum-phase timers (`Q27_SUMPROF`), `bench\ab.py` and `bench\accept_ab.py`
+(fixed prompts and random draws, so tokens per step compare exactly):
+
+| Change | Effect |
+|---|---|
+| Linux build (`build.sh`, CMake presets, `start-server.sh`) | all tests pass under WSL2 with the same logits as Windows |
+| Token embedding in each card's VRAM (was mapped host memory) | embedding reads 20 → 5 µs per pass, about -0.04 ms per step |
+| MTP block re-quantized to Q4_K at load (drafter only) | MTP time 2.76 → 2.16 ms per step; drafts accepted -0.3% (code), -1.1% (Spanish) |
+| Block verification of the drafts (exact) | tokens per step +0.6% (code), +0.1% (Spanish) |
+| L2 prefetch of a sum from separate blocks | sum write phase 13 → 2.4 µs (1 row), 15.5 → 9.4 µs (4 rows); decode about -0.7 ms per step |
+| Last checkpoint restored from the VRAM staging buffer | restore 23 → 1.6 ms |
+
+Measured and not done:
+
+| Idea | Result |
+|---|---|
+| Verify fewer drafts when they are unsure (`bench\draft_len.py`) | loses at every threshold: a verify row costs only ~0.5 ms, and 52% of code steps accept all 3 drafts |
+| A 4th draft | about +5% on code and -1% on Spanish (estimate); needs a 5-column GEMV, which is already at the register limit |
+| Device-side loop over steps (no host between steps) | the host adds only ~0.1 ms per step (`Q27_GAPPROF`) |
+| Prompt batches of 4096 tokens | +3.3% prompt t/s, under the 5% threshold for the extra VRAM |
+| L2 prefetch ahead inside the GEMV loop | 2-4% slower GEMVs |
+| GEMV limited to 128 registers (16 warps per SM) | +1% alone, 0.6 ms slower per step in the engine (two GEMVs share the GPU on parallel branches) |
+| MTP block in IQ4_XS | faster drafts, but -3% accepted drafts on code: Q4_K is better |
+| Partial sums written from inside the GEMV | not built: the write is half of the link time, and many small PCIe writes would waste most of the link |
 
 ## What a faster PCIe link would give
 

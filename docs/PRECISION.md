@@ -30,7 +30,8 @@ where the benchmark against llama.cpp is not like for like.
 | Prompt attention Q K^T | **Q rounded to int8 per 32 values**, K exact | Q and K rounded to f16 | lower KLD than the f16 path | `Q27_ATTN_I8=0` |
 | Attention P V | f16 with llama.cpp's offset | same | none | none |
 | Gated DeltaNet state | f32 | same | none | none |
-| Speculative decoding | exact rejection rule, the output distribution is unchanged | same rule | none on the distribution | none |
+| Speculative decoding | **block verification**, exact: the output distribution is unchanged | token-by-token rejection rule | none on the distribution | `Q27_ACCEPT=token` |
+| MTP block (drafter only) | **re-quantized from Q6_K to Q4_K** at load | Q6_K | none on the output; 0.3-1.1% fewer accepted drafts | `Q27_MTP_TYPE=q6_k` |
 | Draft vocabulary | drafts propose only the 32k most frequent tokens | all tokens | none on the output; only on speed | `--draft-vocab 0` |
 | Sampling options | `top_k` at most 20; no repetition, presence or frequency penalties | all samplers | a request outside these limits behaves differently | none |
 
@@ -89,7 +90,7 @@ The GGUF holds 27.3 billion weights in 12.1 GB:
 | Q4_K | 10.3% | 4.50 |
 | IQ2_S (includes the token embedding table) | 9.1% | 2.56 |
 | IQ2_XS, Q2_K, IQ2_XXS, IQ1_M | 7.2% | 1.75-2.62 |
-| Q6_K (MTP block) | 1.6% | 6.56 |
+| Q6_K (MTP block; the engine re-quantizes it to Q4_K for the drafts) | 1.6% | 6.56 |
 | BF16, F32 (small gates and norms) | 0.1% | 16-32 |
 
 This quantization is the largest approximation of both engines: 3.55 bits per weight on average, against 16 bits
@@ -170,9 +171,15 @@ feedback) and was dropped.
 
 ## Speculative decoding and sampling
 
-- The MTP head drafts 3 tokens and the full model verifies them. A draft is kept with probability min(1, p/q) and a
-  rejected position is resampled from max(0, p - q), the rule llama.cpp uses. This keeps the output distribution
-  equal to plain sampling from the full model. Speculative decoding changes only the speed.
+- The MTP head drafts 3 tokens and the full model verifies them with block verification (Sun et al., ICLR 2025).
+  Like llama.cpp's token-by-token rule (keep a draft with probability min(1, p/q), resample a rejected position from
+  max(0, p - q)), it keeps the output distribution equal to plain sampling from the full model; it accepts slightly
+  more drafts (+0.1-0.6% tokens per step here). `build\test_accept.exe` checks both rules: over millions of
+  simulated steps on synthetic distributions, the frequency of every emitted 3- or 4-token sequence matches the
+  target probability (chi-square below the limit), and a deliberately wrong rule fails by a factor of 2,500 or more.
+  Speculative decoding changes only the speed.
+- The engine re-quantizes the MTP block from Q6_K to Q4_K (7.5% weight error relative to the Q6_K values, checked
+  with `tools\check_requant.py`). Only the drafts use it, so it changes which tokens are proposed, not the output.
 - With greedy decoding, speculative and plain decoding give the same tokens until the first position where the
   top two logits are almost equal (in the test: identical for 140 tokens, then a split at a gap of 0.004). The
   4-token verify pass adds floats in another order than a 1-token pass, which decides such near ties.

@@ -33,7 +33,7 @@ fixed-size recurrent state. Every fourth layer uses full attention with a KV cac
 | Hidden size, FFN size | 5120, 17408 |
 | Full attention | 24 query heads, 4 KV heads, head size 256, sigmoid output gate, RoPE on 64 dims (IMRoPE for images) |
 | Gated DeltaNet | 16 key heads, 48 value heads, head size 128, causal convolution of width 4, f32 state of 128 x 128 per value head |
-| MTP block | one attention layer + FFN (`blk.64`, Q6_K), input projection from 2 x 5120 to 5120 |
+| MTP block | one attention layer + FFN (`blk.64`, Q6_K in the file; the engine re-quantizes it to Q4_K at load), input projection from 2 x 5120 to 5120 |
 | Vocabulary | 248,320 tokens |
 | Trained context | 262,144 tokens |
 | Weights file | `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf`, 12.1 GB, 10 quantization types (IQ1_M to Q6_K), BF16 for the small GDN alpha/beta projections |
@@ -42,7 +42,7 @@ fixed-size recurrent state. Every fourth layer uses full attention with a KV cac
 
 The design follows from four facts about the target machine:
 
-1. **Decode is limited by memory bandwidth.** Each card reads about 430-440 GB/s. One verify pass reads about
+1. **Decode is limited by memory bandwidth.** Each card reads about 430-450 GB/s. One verify pass reads about
    5.7 GB of weights per card, so the floor is about 13 ms per pass.
 2. **The cards cannot talk directly.** GeForce cards on Windows have no peer-to-peer access. All traffic between
    the cards goes through pinned host memory. On the test rig each card has a PCIe 3.0 x4 link. It carries about
@@ -65,7 +65,7 @@ produce partial sums, the two cards add their partials (the cross-card sum below
 | Output layer | vocabulary 0-124,159 | vocabulary 124,160-248,319 | vocabulary |
 | MTP block | half, like an attention layer | half | heads and rows; input projection on both cards |
 | Draft head | half of the 32k draft subset | other half | rows |
-| Token embedding | one IQ2_S table in pinned host memory, read by both cards | | |
+| Token embedding | a copy of the IQ2_S table (407 MB) | the same copy | each card reads its own rows |
 | Vision encoder | | whole encoder | card 1 only (card 0 has the desktop) |
 
 Each card keeps the same residual stream. After every sum both cards hold the same values, bit for bit.
@@ -78,7 +78,7 @@ next three. A step emits 1 to 4 tokens, about 3 on average.
 ```mermaid
 flowchart TD
     V["<b>Verify pass</b><br/>4 tokens: the last emitted token + 3 drafts<br/>64 layers, 128 cross-card sums,<br/>output layer over the full vocabulary"]
-    S["<b>Sampling and acceptance</b> (GPU)<br/>top-k per vocabulary half, candidate exchange,<br/>top-p / min-p / temperature, llama.cpp acceptance rule"]
+    S["<b>Sampling and acceptance</b> (GPU)<br/>top-k per vocabulary half, candidate exchange,<br/>top-p / min-p / temperature, block verification"]
     C["<b>MTP catch-up</b><br/>the accepted rows enter the MTP KV cache"]
     D["<b>3 drafts</b>, one after the other<br/>MTP block + draft head over a 32k-token subset"]
     H["Host reads the emitted tokens"]
@@ -87,9 +87,19 @@ flowchart TD
 
 - **One CUDA graph per step and card.** The whole step, including sampling and the acceptance test, runs on the
   GPU. The host launches the graph, waits, and reads 1-4 tokens.
-- **Acceptance.** The rule is llama.cpp's (`common/sampling.cpp`): a draft is kept with probability
-  min(1, p/q); after a rejection the next token is drawn from max(0, p - q). The output distribution is the same
-  as plain sampling.
+- **Acceptance.** Block verification (Sun et al., "Block Verification Accelerates Speculative Decoding", ICLR 2025):
+  the three drafts are judged together. A weight P_i = min(P_{i-1} p_i/q_i, 1) follows the chain, and the longest
+  prefix passes with a probability derived from the residual mass max(P_i p - q, 0) of the next position. The next
+  token comes from that residual, or from the target after a fully accepted chain. The output distribution is the
+  same as plain sampling, and the expected number of tokens per step is never lower than with llama.cpp's
+  token-by-token rule (`common/sampling.cpp`: keep a draft with probability min(1, p/q), else draw from
+  max(0, p - q)). `Q27_ACCEPT=token` selects llama.cpp's rule. `build\test_accept.exe` checks both rules on
+  synthetic distributions: the frequency of every emitted sequence must match the target (chi-square), and a
+  deliberately wrong rule must fail. Code is in `src/accept.cuh`.
+- **MTP layer in Q4_K.** The file stores the MTP block in Q6_K. Only the drafts read it, four times per step, so the
+  engine re-quantizes it to Q4_K at load (`src/requant.cpp`, ported from llama.cpp's reference quantizers; it runs
+  on a CPU thread while the cards load the main layers). A smaller drafter changes which tokens get proposed, never
+  the output distribution. It saves 0.6 ms per step and costs 0.3-1.1% of the accepted drafts.
 - **GDN rollback.** The recurrent state cannot be cut back. The verify pass therefore keeps the state after each of
   its 4 tokens (4 state planes). The next pass starts from the plane of the last accepted token.
 - **Draft vocabulary.** The drafts score only the 32,768 tokens that a frequency ranking (`data\draft_vocab.bin`)
@@ -143,8 +153,11 @@ sequenceDiagram
   so the link sees 16-byte accesses.
 - **Why bytes matter.** The link carries about 3 GB/s per card for reads and writes together. At 4 tokens a sum
   sends 23 KB and receives 23 KB per card. Fewer bytes are the only way to make it shorter.
-- **Prefetch.** While the sum kernel waits for the peer, it prefetches the first 4 MB of the next GEMV's weights
-  into L2 (`cp.async.bulk.prefetch.L2`).
+- **Prefetch.** While the row blocks wait for the peer, 4 extra blocks of the same kernel prefetch the first 4 MB of
+  the next GEMV's weights into L2 (`cp.async.bulk.prefetch.L2`) and exit. When the row blocks issued the prefetch
+  themselves, the issue held each block about 10 µs at its next barrier and delayed the flag to the other card.
+- **Phases.** `Q27_SUMPROF=1` times each phase inside the kernel. At 4 rows on the slower card: write own partial
+  9.4 µs, flag and wait 2 µs, read the peer's partial 8 µs. The link moves about 46 KB per sum at about 2.7 GB/s.
 
 ## Kernels
 
@@ -190,7 +203,9 @@ copy engine:            A(p): out, flag, wait, in | B(p): out, flag, wait, in | 
   fixed points: after the first turn, at the start of the last message, 512 tokens before the end of a long last
   message, at the start of the generation prompt, and every 16,384 tokens (at most 8 per conversation). A request
   that edits an earlier message restarts from the nearest checkpoint. A request that changes only the end of a long
-  last message (a regenerate, or a new question about the same document) re-reads about 600 tokens.
+  last message (a regenerate, or a new question about the same document) re-reads about 600 tokens. The last saved
+  checkpoint also stays in a VRAM staging buffer; when a request restarts from it (the usual case in an agent
+  loop), the restore takes 1.6 ms instead of 23 ms.
 - **RAM swap.** When a side request replaces most of the live conversation, the conversation (KV rows, state and
   checkpoints) is first copied to RAM (0.2-0.5 s for 16k tokens). A later request loads it back in 0.1-0.2 s.
   The RAM budget is `--cache-ram` (8192 MB by default).
@@ -241,7 +256,7 @@ With the server defaults (q8_0 KV, prompt batches of 2048, vision on):
 
 | Item | Card 0 | Card 1 |
 |---|---|---|
-| Weights (half of each layer, MTP, draft head) | about 5.9 GB | about 5.9 GB |
+| Weights (half of each layer, MTP, draft head, token embedding) | about 6.2 GB | about 6.2 GB |
 | KV cache, 262,144 tokens | 4.5 GB | 4.5 GB |
 | GDN state, 4 planes | 0.3 GB | 0.3 GB |
 | Prompt buffers (2048-token batch) | about 0.7 GB | about 0.7 GB |
@@ -267,6 +282,13 @@ for tests and comparisons.
 | `Q27_PF_MID` | off | `1` also prefetches in the GDN conv and attention prep kernels |
 | `Q27_PDL`, `Q27_PDL_SUM` | off | programmatic dependent launch for all kernels / for the GEMV after a sum |
 | `Q27_GEMM_CFG` | auto | prompt GEMM tile: 0 = 128 x 64, 4 = 128 x 128 with 16 warps (see `src/qgemm.cu`) |
+| `Q27_PF_BLOCKS`, `Q27_PF_INROW` | 4, off | extra blocks that issue the L2 prefetch of a cross-card sum; `Q27_PF_INROW=1` issues it from the row blocks (old) |
+| `Q27_MTP_TYPE` | `q4_k` | type of the MTP block: `q4_k`, `iq4_xs`, or `q6_k` (as in the file) |
+| `Q27_ACCEPT` | block | `token` selects llama.cpp's token-by-token acceptance rule |
+| `Q27_EMBD_HOST` | off | `1` keeps one token embedding table in mapped host memory instead of a copy per card |
+| `Q27_STAGE_HIT` | on | `0` always restores checkpoints from host memory |
 | `Q27_DRAFT_VOCAB` | none | tools only: draft vocabulary file and size, e.g. `data\draft_vocab.bin:32768` (the server uses `--draft-vocab`) |
 | `Q27_PROF` | off | `1` adds GPU time stamps; `q27_gen` prints the time per kernel group |
+| `Q27_SUMPROF`, `Q27_GAPPROF` | off | `1` prints the phase times of the cross-card sums / the host time per decode step when the decoder ends |
+| `Q27_DRAFTLOG` | none | `q27_gen ... accept` only: writes the drafts' probabilities and the tokens emitted per step to a file |
 | `Q27_UNFUSED`, `Q27_GDN_OLD`, `Q27_BF16_OLD` | off | older kernel paths, for bit-exactness tests |
