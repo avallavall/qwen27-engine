@@ -60,7 +60,8 @@ limits are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 The engine runs the same quantized model file as llama.cpp and copies llama.cpp's numerics in its kernels. It
 departs from llama.cpp in three places:
 
-- **KV cache in q8_0** (int8 with an fp16 scale per 32 values) instead of f16. `Q27_KV=f16` switches it back.
+- **KV cache in q8_0** (int8 with an fp16 scale per 32 values) instead of f16. `-Kv f16` in the start scripts (or `Q27_KV=f16`)
+  switches it back.
 - **Sums between the two cards in int8** with error feedback instead of bf16. `Q27_WIRE=bf16` switches it back.
 - **Prompt attention computes Q K^T in int8.** K is used exactly as stored in the cache. `Q27_ATTN_I8=0` switches
   it back.
@@ -146,7 +147,14 @@ builds only the server.
 powershell -File start-server.ps1 -ApiKey <key>
 ```
 
-This starts the server on `http://127.0.0.1:8081`, with vision when the mmproj file is found.
+This starts the server on `http://127.0.0.1:8081`, with vision when the mmproj file is found. With an f16 KV cache:
+
+```
+powershell -File start-server.ps1 -ApiKey <key> -Kv f16
+```
+
+`arranca-q27.ps1` takes the same `-Kv f16`. Without a script, set the environment variable `Q27_KV=f16` before you
+start `build\q27_server.exe` (the test tools read it too).
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -155,7 +163,7 @@ This starts the server on `http://127.0.0.1:8081`, with vision when the mmproj f
 | `-ApiKey` | `$env:Q27_API_KEY` | API key (`Authorization: Bearer` or `X-Api-Key`); without a key the server is open |
 | `-Ctx` | 0 | context in tokens; 0 = the largest that fits (262,144, the model's maximum, with q8_0 KV) |
 | `-Effort` | medium | default reasoning effort: low, medium, xhigh |
-| `-Kv` | q8_0 | KV cache type: q8_0 or f16 |
+| `-Kv` | q8_0 | KV cache type. `-Kv f16` selects an f16 cache: more accurate on paper, 15% slower decode at 150k, about 190k tokens of context at most instead of 262k. Other values are refused. |
 | `-Model`, `-Mmproj` | see [Model files](#model-files) | model paths; `-NoVision` for text only |
 | `-LogDir` | none | write every request and result as JSON files (for debugging and the checks below) |
 

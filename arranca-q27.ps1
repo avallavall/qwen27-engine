@@ -11,7 +11,8 @@ param(
   [string]$ApiKey = "",
   [string]$Effort = "medium",    # default reasoning effort: low, medium, xhigh (high is taken as xhigh)
   [int]$Ctx = 0,                 # 0 = the largest context that fits (262144 with q8_0 KV)
-  [string]$Kv = "q8_0",          # q8_0 or f16
+  [ValidateSet("q8_0", "f16")]
+  [string]$Kv = "q8_0",          # KV cache type: q8_0 (default) or f16 (-Kv f16)
   [string]$Model = "",           # model files: see Find-ModelFile below
   [string]$Mmproj = ""
 )

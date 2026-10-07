@@ -6,6 +6,7 @@
 #include <array>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <numeric>
@@ -988,7 +989,12 @@ int Decoder::begin(const std::vector<int>& prompt, const SampleParams& sp) {
 
 bool Decoder::kv_q8_from_env() {
   const char* e = getenv("Q27_KV");  // default q8_0 (user decision 2026-10-06); Q27_KV=f16 for f16
-  return !(e && (std::string(e) == "f16" || std::string(e) == "F16"));
+  if (!e || !*e) return true;
+  std::string s(e);
+  for (char& ch : s) ch = (char)tolower((unsigned char)ch);
+  if (s == "q8_0" || s == "q8") return true;
+  if (s == "f16" || s == "fp16") return false;
+  throw std::runtime_error("Q27_KV=" + std::string(e) + ": use q8_0 (default) or f16");
 }
 
 size_t Decoder::kv_bytes_per_token(const Model& m, bool kv_q8) {

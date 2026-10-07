@@ -9,7 +9,8 @@ param(
   [int]$Ctx = 0,                 # 0 = the largest context that fits (vision reserve included)
   [string]$ApiKey = $env:Q27_API_KEY,
   [string]$Effort = "medium",    # reasoning effort default: xhigh, medium or low
-  [string]$Kv = "q8_0",          # KV cache type: q8_0 (default) or f16
+  [ValidateSet("q8_0", "f16")]
+  [string]$Kv = "q8_0",          # KV cache type: q8_0 (default) or f16 (-Kv f16)
   [string]$Model = "",           # the GGUF (see Find-ModelFile below)
   [string]$Mmproj = "",          # image encoder of the same model; "none" = text only
   [switch]$NoVision,
