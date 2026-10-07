@@ -209,7 +209,8 @@ Work estimates are calendar weeks of focused work. They are estimates.
   **Stop point:** if a sum costs more than 25 µs at 40 KiB inside the graph, re-plan the split.
 
 - **Status 2026-10-06: core done.** `Model`/`Decoder` take 1 or 2 devices (`q27_ppl ... 0,1`). Split as
-  llama.cpp; embedding table in mapped pinned host memory (read by both cards). Cross-card sum: one-shot
+  llama.cpp; embedding table in mapped pinned host memory (read by both cards; since 2026-10-07 a copy in each
+  card's VRAM). Cross-card sum: one-shot
   through mapped host memory, BF16 wire like llama.cpp, inside each card's CUDA graph: 12 us per sum at
   one token. One token, no MTP, 2 cards: 19.6 ms (llama.cpp `-sm tensor -ub 1`: 19.9 ms). Logits vs
   llama.cpp 2-card: KLD 0.00057, same top 99.17%. Profile: GEMV 15.4 ms (353 GB/s per card), sums
@@ -225,7 +226,8 @@ Work estimates are calendar weeks of focused work. They are estimates.
 
 - **Status 2026-10-06: core done.** One CUDA graph per step per card: verify 4 tokens (GDN state snapshots
   in 4 planes), GPU sampling (top-k per vocab half, candidate exchange between cards, top-p, temperature),
-  llama.cpp acceptance rule, MTP catch-up (4 rows), 3 draft passes. Tool `build\q27_gen.exe`.
+  llama.cpp acceptance rule (since 2026-10-07: block verification, also exact), MTP catch-up (4 rows), 3 draft
+  passes. Tool `build\q27_gen.exe`.
   The 4-token pass alone vs llama.cpp `-ub 4`: KLD 0.00058, same top 99.31%; 23.0 ms vs 28.0 ms.
   Greedy check: speculative = plain decoding for 177 of 200 tokens; the split happens at the smallest
   top-1/top-2 logit gap of the run (0.027), which points to rounding between the 1-token and 4-token
@@ -317,7 +319,7 @@ Total without M8: about 15-21 weeks.
 |---|---|---|---|
 | How to build it | New engine for the hot path; copy llama.cpp code for the rest (quant tables, MMQ prefill kernels, tokenizer, `mtmd` for vision at first). Ceiling 1.4-1.6x decode. | Fork llama.cpp and rewrite the hot spots inside it (GPU sampling under `-sm tensor`, draft loop, GEMV kernels, sums). First gains in 2-4 weeks. Ceiling about 1.2-1.3x (estimate): the graph split at every sum and the CPU-side MTP loop are deep in its design, and every upstream update needs a rebase. | A. M1 is the test: if the new GEMV kernels do not reach 80% of read bandwidth, move them into a llama.cpp fork (B) and stop. |
 | KV cache type | f16 (matches llama.cpp, 1x context cost) | q8_0 (saves 6.4 ms/step at 150k, context up to 262144) | f16 for M1-M4 checks, then measure q8_0 and decide with numbers |
-| ~~When to install Ubuntu~~ | | | Decided 2026-10-06: Windows only for now. |
+| ~~When to install Ubuntu~~ | | | Decided 2026-10-06: Windows only for now. 2026-10-07: the Linux build was done and tested under WSL2 (M8); native Ubuntu stays the user's decision. |
 
 Note: removing unused parts from llama.cpp (other models, other backends, the web UI) gives no
 speed by itself. The speed comes only from changing the hot path.

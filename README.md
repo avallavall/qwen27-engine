@@ -245,6 +245,8 @@ in the variable named by `envKey`). To let Qwen Code choose the reasoning effort
 | Chat template vs jinja2 | `python tools\gen_template_fixtures.py`, then `build\test_template.exe bench\out\template_fixtures.json` |
 | Tool-call parser | `build\test_parser.exe <model.gguf>` |
 | Cross-card sum, fused kernels | `build\test_ar.exe`, `build\test_fused.exe` |
+| Draft acceptance rules keep the target distribution | `build\test_accept.exe` (Monte Carlo, chi-square; a broken rule must fail) |
+| MTP re-quantization to Q4_K | `build\test_requant.exe <model> blk.64.ffn_down.weight q4_k out.bin`, then `python tools\check_requant.py <model> blk.64.ffn_down.weight q4_k out.bin` |
 | Prompt cache (GPU) | `build\test_cache.exe <model.gguf> <token file>` |
 | Vision encoder vs llama.cpp | `build\test_vision.exe <mmproj.gguf> compare bench\out\vision` (reference: `bench\build-llama-vision.bat`) |
 | Server, end to end | start the server with a key, then `python bench\test_server.py` (`BENCH_KEY`, `BENCH_URL`) |
