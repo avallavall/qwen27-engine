@@ -265,5 +265,8 @@ already hides most of the link time behind compute.
 | Decode and prompt speed without the server | `build\q27_gen.exe <model> <tokens> 0,1 1000,30000,100000,150000 400 depth 2` |
 | Time per kernel group | `set Q27_PROF=1`, then `build\q27_gen.exe <model> <ref> 0,1 1000 400 sample` |
 | A/B of settings | `python bench\ab.py 2 "a=Q27_WIRE=bf16" "b=Q27_WIRE=q8b16"` (`BENCH_MODE=depth:30000` for prompt speed) |
+| Draft acceptance A/B (fixed prompts and draws) | `python bench\accept_ab.py 2 "a=Q27_ACCEPT=token" "b=Q27_ACCEPT=block"` |
+| Nsight Compute summary of the GEMV per type | `bash bench/ncu_gemv.sh <model> 4` |
+| Phases of the cross-card sums, host time per step | `set Q27_SUMPROF=1` / `set Q27_GAPPROF=1`, then `build\q27_gen.exe ... sample` |
 | Kernel benchmarks | `build\bench_gemv.exe`, `build\bench_gemm.exe <model> 1 1024`, `build\bench_attn.exe 1 131072 q8 prefill`, `build\bench_link2.exe` |
 | Accuracy | see [Tests and benchmarks](../README.md#tests-and-benchmarks) |
