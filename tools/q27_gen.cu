@@ -112,6 +112,9 @@ int main(int argc, char** argv) try {
     SampleParams sp;
     long tok_sum = 0, step_sum = 0;
     double ms_sum = 0;
+    // Q27_DRAFTLOG=<file>: one line per step: the drafts' top-1 and drawn-token probabilities, then the tokens emitted
+    // (draft statistics for the draft-length study; slows the run)
+    FILE* dlog = getenv("Q27_DRAFTLOG") ? fopen(getenv("Q27_DRAFTLOG"), "w") : nullptr;
     for (int i = 0; i < R; i++) {
       dec.reset();
       dec.prefill(toks.data() + (size_t)i * stride, np);
@@ -120,13 +123,18 @@ int main(int argc, char** argv) try {
       auto t1 = clk::now();
       while (n_out < ngen) {
         int out[4];
-        n_out += dec.spec_step(out);
+        float t1p[3], pd[3];
+        if (dlog) dec.draft_info(t1p, pd);
+        const int n = dec.spec_step(out);
+        n_out += n;
         steps++;
+        if (dlog) fprintf(dlog, "%d %.4f %.4f %.4f %.4f %.4f %.4f %d\n", i, t1p[0], t1p[1], t1p[2], pd[0], pd[1], pd[2], n);
       }
       ms_sum += std::chrono::duration<double, std::milli>(clk::now() - t1).count();
       tok_sum += n_out - 1;
       step_sum += steps;
     }
+    if (dlog) fclose(dlog);
     printf("accept: %d prompts x %d tokens: %.3f tok/step, %.2f ms/step, %.1f tok/s\n", R, ngen, (double)tok_sum / step_sum,
            ms_sum / step_sum, tok_sum / (ms_sum / 1000.0));
     return 0;

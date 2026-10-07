@@ -506,7 +506,27 @@ Decoder::Decoder(const Model& m, int n_ctx, bool kv_q8) : m_(m), n_ctx_(n_ctx), 
   }
 }
 
+// Q27_GAPPROF=1: host gap of the speculative step: wall time per run(kStep), GPU time of each card's graph, and the
+// host time between two steps (outside run). Printed when the decoder is destroyed.
+namespace {
+struct GapProf {
+  bool on = [] { const char* e = getenv("Q27_GAPPROF"); return e && e[0] == '1'; }();
+  long n = 0;
+  double wall = 0, gpu[2] = {0, 0}, between = 0, launch = 0;
+  std::chrono::steady_clock::time_point last_end;
+  bool have_last = false;
+  cudaEvent_t e[2][2] = {};
+};
+GapProf& gapprof() { static GapProf g; return g; }
+}  // namespace
+
 Decoder::~Decoder() {
+  if (GapProf& gp = gapprof(); gp.on && gp.n) {
+    fprintf(stderr, "host gap (Q27_GAPPROF): %ld steps | wall per run %.1f us (launch calls %.1f) | GPU card 0 %.1f us, card 1 "
+            "%.1f us | host time between steps %.1f us\n", gp.n, gp.wall / gp.n, gp.launch / gp.n, gp.gpu[0] / gp.n,
+            gp.gpu[1] / gp.n, gp.between / (gp.n > 1 ? gp.n - 1 : 1));
+    gp.n = 0; gp.wall = gp.gpu[0] = gp.gpu[1] = gp.between = gp.launch = 0; gp.have_last = false;
+  }
   // Q27_SUMPROF=1: average phase times of the cross-card sums (verify = exchange indices 0..127 of the step graph).
   for (size_t ri = 0; ri < r_.size(); ri++) {
     if (!r_[ri].tprof) continue;
@@ -887,8 +907,16 @@ void Decoder::warmup() {
   warm_ = true;
 }
 
+
 void Decoder::run(Kind k) {
   if (!warm_) warmup();
+  GapProf& gp = gapprof();
+  const bool gap = gp.on && k == kStep && r_.size() <= 2;
+  std::chrono::steady_clock::time_point tw0, tw1;
+  if (gap) {
+    tw0 = std::chrono::steady_clock::now();
+    if (gp.have_last) gp.between += std::chrono::duration<double, std::micro>(tw0 - gp.last_end).count();
+  }
   for (int ri = 0; ri < (int)r_.size(); ri++) {
     Rank& R = r_[ri];
     CK(cudaSetDevice(R.sh->dev));
@@ -906,11 +934,30 @@ void Decoder::run(Kind k) {
   for (int ri = 0; ri < (int)r_.size(); ri++) {
     Rank& R = r_[ri];
     CK(cudaSetDevice(R.sh->dev));
+    if (gap) {
+      if (!gp.e[ri][0]) { CK(cudaEventCreate(&gp.e[ri][0])); CK(cudaEventCreate(&gp.e[ri][1])); }
+      CK(cudaEventRecord(gp.e[ri][0], R.s));
+    }
     if (R.graph[k]) CK(cudaGraphLaunch(R.graph[k], R.s));
     else enqueue(ri, k, true);
+    if (gap) CK(cudaEventRecord(gp.e[ri][1], R.s));
     cudaStreamQuery(R.s);  // push the work out of the WDDM queue so the peer can meet it
   }
+  if (gap) tw1 = std::chrono::steady_clock::now();
   for (auto& R : r_) { CK(cudaSetDevice(R.sh->dev)); CK(cudaStreamSynchronize(R.s)); }
+  if (gap) {
+    const auto tw2 = std::chrono::steady_clock::now();
+    gp.n++;
+    gp.wall += std::chrono::duration<double, std::micro>(tw2 - tw0).count();
+    gp.launch += std::chrono::duration<double, std::micro>(tw1 - tw0).count();
+    for (size_t ri = 0; ri < r_.size(); ri++) {
+      float ms = 0;
+      CK(cudaEventElapsedTime(&ms, gp.e[ri][0], gp.e[ri][1]));
+      gp.gpu[ri] += ms * 1000.0;
+    }
+    gp.last_end = tw2;
+    gp.have_last = true;
+  }
   if (ar_err_ && *ar_err_) throw std::runtime_error("cross-card exchange timed out");
   if (prof::on() && k == kStep)
     for (auto& R : r_) { CK(cudaSetDevice(R.sh->dev)); prof::collect(R.prof_a[k], R.prof_b[k]); }
@@ -1045,6 +1092,20 @@ int Decoder::fit_ctx(const Model& m, const std::vector<size_t>& reserve, bool kv
     best = std::min(best, avail / (long long)per_tok);
   }
   return (int)std::max(0LL, best / 256 * 256);
+}
+
+void Decoder::draft_info(float* top1, float* pdraw) {
+  Rank& R = r_[0];
+  CK(cudaSetDevice(R.sh->dev));
+  CandRow q[kDrafts];
+  DState st;
+  CK(cudaMemcpy(q, R.qc, sizeof(q), cudaMemcpyDeviceToHost));
+  CK(cudaMemcpy(&st, R.st, sizeof(st), cudaMemcpyDeviceToHost));
+  for (int j = 0; j < kDrafts; j++) {
+    top1[j] = q[j].n > 0 ? q[j].p[0] : 0.f;
+    pdraw[j] = 0.f;
+    for (int i = 0; i < q[j].n; i++) if (q[j].id[i] == st.d[j]) pdraw[j] = q[j].p[i];
+  }
 }
 
 int Decoder::spec_step(int* out) {
@@ -1667,6 +1728,8 @@ void Decoder::state_save(const std::vector<uint8_t*>& host) {
     CK(cudaStreamWaitEvent(ss_[ri], ev_staged_[ri], 0));
     CK(cudaMemcpyAsync(host[ri], stage_[ri], sb, cudaMemcpyDeviceToHost, ss_[ri]));
     CK(cudaEventRecord(ev_saved_[ri], ss_[ri]));
+    if (stage_of_.size() != r_.size()) stage_of_.assign(r_.size(), nullptr);
+    stage_of_[ri] = host[ri];
   }
 }
 
@@ -1684,13 +1747,19 @@ void Decoder::state_load(const std::vector<uint8_t*>& host, int pos) {
     Rank& R = r_[ri];
     CK(cudaSetDevice(R.sh->dev));
     const size_t conv_n = (size_t)R.sh->conv_channels() * (hp.conv_k - 1), ssm_n = (size_t)R.sh->vh * hp.ssm_dim * hp.ssm_dim;
-    const float* p = (const float*)host[ri];
+    // The last saved state is still in the VRAM staging buffer (the usual case in an agent loop: the next request
+    // restarts at the last checkpoint): copy from there instead of from host memory (about 1 ms instead of 23 ms).
+    // Q27_STAGE_HIT=0 always reads host memory.
+    static const bool hit_on = [] { const char* e = getenv("Q27_STAGE_HIT"); return !(e && e[0] == '0'); }();
+    const bool hit = hit_on && ri < (int)stage_of_.size() && stage_of_[ri] == host[ri];
+    const float* p = hit ? stage_[ri] : (const float*)host[ri];
+    const cudaMemcpyKind kind = hit ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice;
     for (size_t ig = 0; ig < R.conv_st.size(); ig++) {
-      CK(cudaMemcpyAsync(R.conv_st[ig], p, conv_n * sizeof(float), cudaMemcpyHostToDevice, R.s));
-      CK(cudaMemcpyAsync(R.ssm_st[ig], p + conv_n, ssm_n * sizeof(float), cudaMemcpyHostToDevice, R.s));
+      CK(cudaMemcpyAsync(R.conv_st[ig], p, conv_n * sizeof(float), kind, R.s));
+      CK(cudaMemcpyAsync(R.ssm_st[ig], p + conv_n, ssm_n * sizeof(float), kind, R.s));
       p += conv_n + ssm_n;
     }
-    CK(cudaMemcpyAsync(R.pend_h, p, sizeof(float) * hp.n_embd, cudaMemcpyHostToDevice, R.s));
+    CK(cudaMemcpyAsync(R.pend_h, p, sizeof(float) * hp.n_embd, kind, R.s));
     set_int(R.dplane, 0, R.s);
   }
   for (auto& R : r_) { CK(cudaSetDevice(R.sh->dev)); CK(cudaStreamSynchronize(R.s)); }

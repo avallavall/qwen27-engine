@@ -138,6 +138,9 @@ class Decoder {
   // One speculative step (verify 4, accept, MTP catch-up, 3 drafts). Writes the emitted tokens
   // (1..4) to out and returns how many. The last emitted token is pending (not in the caches yet).
   int spec_step(int* out);
+  // Debug (draft statistics): for the drafts of the next step, the top-1 probability of each draft row and the
+  // draft probability of the drawn token (card 0's copy).
+  void draft_info(float* top1, float* pdraw);
   int n_ctx() const { return n_ctx_; }
   // KV cache bytes per token on each card (16 attention layers + MTP layer, K and V).
   static size_t kv_bytes_per_token(const Model& m, bool kv_q8 = false);
@@ -284,6 +287,7 @@ class Decoder {
   void upload_rope(int ri, int M);   // batch_rope_ -> PRank.rope
   const int* rope_dev(int ri, int r0) const;
   std::vector<float*> stage_;       // per card: VRAM staging buffer for state_save (state_bytes)
+  std::vector<const uint8_t*> stage_of_;  // per card: host buffer of the last state_save (its data is still in stage_)
   std::vector<cudaStream_t> ss_;    // per card: side stream of state_save
   std::vector<cudaEvent_t> ev_staged_, ev_saved_;
   void kv_copy(int ri, uint8_t* host, int p0, int p1, bool to_host);
