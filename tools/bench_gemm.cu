@@ -3,6 +3,9 @@
 // For every (type, K, N) group: the first tensor, M random tokens (normal values, 1% outliers x5) as q8_1.
 // Check: qgemm against the decode GEMV (qgemv, 4 tokens at a time) on the same q8_1 inputs; prints the
 // largest difference relative to the RMS of the output. Speed: TOPS = 2 N K M / time.
+// Q2_K and Q4_K show 0.1-1.0 with random inputs, and that is expected: their min term uses the sum of the float
+// activations in the GEMM (llama.cpp MMQ) but the sum of the rounded int8 values in the GEMV (llama.cpp MMVQ).
+// GEMM_EXACT=1 uses inputs that q8_1 holds exactly, so both sums agree: then every type must be below ~2e-3.
 #include "common.cuh"
 #include "gguf.h"
 #include "qmat.h"

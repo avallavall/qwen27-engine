@@ -2,6 +2,7 @@
 # Usage: .venv\Scripts\python.exe bench\ab.py <reps> "<label>=<ENV=v,ENV=v>" ["<label>=..."] ...
 #   env BENCH_MODE=sample (default; 1k prompt, 400 tokens, 3 runs, the first run is dropped) or depth:<D> (prefill to
 #   depth D, then 2 runs of 400 tokens). Prints the median and min ms/step per setting (and prompt t/s in depth mode).
+#   A setting may name another binary with EXE=<path relative to the repo>, e.g. "b=EXE=build/q27_gen_b.exe".
 import os, re, statistics, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,12 +27,13 @@ for r in range(reps):
     for label, env in cfgs:
         e = dict(os.environ, CUDA_DEVICE_ORDER="PCI_BUS_ID", Q27_DRAFT_VOCAB=os.path.join(ROOT, "data", "draft_vocab.bin") + ":32768")
         e.update(env)
+        exe = os.path.join(ROOT, e.pop("EXE", os.path.join("build", "q27_gen.exe")))  # EXE=<path>: another build
         if mode == "sample":
-            cmd = [os.path.join(ROOT, "build", "q27_gen.exe"), MODEL, os.path.join(ROOT, "bench", "out", "llama_tp2_ub4_base.bin"),
+            cmd = [exe, MODEL, os.path.join(ROOT, "bench", "out", "llama_tp2_ub4_base.bin"),
                    "0,1", "1000", "400", "sample"]
         else:
             d = mode.split(":")[1]
-            cmd = [os.path.join(ROOT, "build", "q27_gen.exe"), MODEL, os.path.join(ROOT, "bench", "out", "tok_200k.bin"), "0,1", d,
+            cmd = [exe, MODEL, os.path.join(ROOT, "bench", "out", "tok_200k.bin"), "0,1", d,
                    "400", "depth", "2"]
         out = subprocess.run(cmd, env=e, capture_output=True, text=True, cwd=ROOT).stdout
         ms = [float(m) for m in re.findall(r"([\d.]+) ms/step", out)]
