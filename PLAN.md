@@ -1,8 +1,12 @@
 # PLAN: a Qwen3.8-27B engine for 2x RTX 5060 Ti
 
-> Development notes. Paths like `qwen38_27\` and `llama-rig2\` are folders next to this repository on the
-> development PC (the production llama.cpp setup and the llama.cpp source used as a reference). Mentions of
-> "HANDOFF" refer to the local work checklist, which is not part of the repository.
+> This file is the development record: the scope, the plan made from the research, the status of each milestone
+> and the raw measurement log. The current design is described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+> and the current numbers in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+>
+> Paths like `qwen38_27\` and `llama-rig2\` are folders next to this repository on the development PC (the
+> production llama.cpp setup and the llama.cpp source used as a reference). Mentions of "HANDOFF" refer to the
+> local work checklist, which is not part of the repository.
 
 One model (Qwen3.8-27B, `Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf`). One rig (2x RTX 5060 Ti 16 GB,
 PCIe Gen 3 x4 each, no P2P on Windows). One client type (agent harness: OpenCode, dsh, pi).
@@ -27,13 +31,21 @@ Research reports with sources are in `research/`. Measurement tools are in `benc
 
 ---
 
-## Status 2026-10-06
+## Status
 
-M1-M7 done. The engine (`start-server.ps1`, or `arranca-q27.ps1` in place of production on port 8080) serves
-text, tools and images to Qwen Code, with every milestone check passed. Final numbers: measurement log, "Engine,
-final" and "Head-to-head at the same context". After those: the MTP drafts score a 32k-token subset of the vocabulary
-(+7% on code, +5% on Spanish). GDN rollback by replay was measured and does not pay. M8 (Linux)
-is postponed by the user.
+**2026-10-06: first complete version.** M1-M7 done. The engine (`start-server.ps1`, or `arranca-q27.ps1` in place
+of production on port 8080) serves text, tools and images to Qwen Code, with every milestone check passed. Numbers:
+measurement log, "Engine, final" and "Head-to-head at the same context". After those, the MTP drafts score a
+32k-token subset of the vocabulary (+7% on code, +5% on Spanish). GDN rollback by replay was measured and does not
+pay. M8 (Linux) is postponed by the user.
+
+**2026-10-07: second speed round.** The engine was profiled with GPU time stamps inside its CUDA graphs
+(`Q27_PROF=1`), and each bottleneck was changed and measured alone. Main changes: cross-card sums on an int8 wire
+with error feedback, independent GEMVs on parallel graph branches, a pipelined prompt GEMM, prompt attention with
+int8 Q K^T, and prompt batches of 2048 tokens. Head-to-head against llama.cpp at the same context: decode steps
+1.65-1.67x faster at every depth (was 1.53-1.58x), prompt reading 2.27-2.41x (was 1.16-1.27x), a recorded Qwen
+Code session 1.92x (was 1.26x). The logit tests stay inside the limits. The list of changes and their measured
+effects is in [docs/PERFORMANCE.md](docs/PERFORMANCE.md#optimization-history).
 
 ## Phase 0 result: where the time goes, and the floor
 
@@ -115,6 +127,9 @@ directions on Windows. Kernel-driven transfers or Linux are needed for that.
 ---
 
 ## Design decisions (from research)
+
+The decisions as taken before the code was written. Later changes are recorded in the milestone status lines,
+the measurement log and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 | Topic | Decision | Why | Report |
 |---|---|---|---|
@@ -459,3 +474,27 @@ The agent loop replays the 11 requests of a real Qwen Code session (`bench\out\q
 At 100k llama.cpp read fewer prompt tokens (it reused 29k cached tokens, q27 16k: q27's periodic checkpoints are
 every 16384 tokens); t/s is per token read.
 
+### Second speed round (2026-10-07)
+
+Server with vision, context 262,144, q8_0 KV (`bench\final_bench.py`, log `bench\out\final-bench-2026-10-07.log`):
+
+| | 1k | 30k | 100k | 150k |
+|---|---|---|---|---|
+| Server tok/s, `mide-tps.py` 4 runs x 400 tokens | 127-133 | 113-121 | 89-105 | 83-93 |
+| Before (Engine, final) | 101-110 | 93-97 | 79-85 | 75-79 |
+| llama.cpp | 68-74 | 61-65 | 51-55 | 46-48 |
+
+| Prompt reading (server, first request) | 0-30k | 30k-100k | 100k-150k |
+|---|---|---|---|
+| Now t/s | 1449 | 1215 | 954 |
+| Before (Engine, final) | 769 | 612-629 | 489-490 |
+| llama.cpp | 667 | 540 | 439 |
+
+- 4K image end to end: 4.9-6.0 s (before 7.7-7.8 s, llama.cpp 12.7 s).
+- VRAM after a 150k prompt and three 4K images: 12,902 / 13,364 MiB.
+- These runs came before the 16-warp prompt GEMM tile, which added about 5% prompt speed.
+
+Head-to-head again at 180,224 context (`bench\compare.py q27v2`, results `bench\out\cmp_q27v2.json`, report
+`bench\out\compare_report_v2.md`), with the final build. The tables with all three runs (llama.cpp, first version,
+second round), the accuracy results, the time split and the link measurements are in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).

@@ -5,7 +5,10 @@ Parts of this engine copy code, lookup tables or numeric formulas from llama.cpp
 
 - `src/quant_tables.h` (IQ codebooks, generated from `ggml/src/ggml-common.h`)
 - per-type dot-product math in `src/qgemv.cu` (from `ggml/src/ggml-cuda/vecdotq.cuh`)
-- kernel numerics in `src/ops.cu` and `src/sampling.cu`, log-prob compression in `tools/q27_ppl.cu`
+- kernel numerics in `src/ops.cu`, `src/prefill.cu` and `src/sampling.cu`, the MMQ quantized-GEMM numerics in
+  `src/qgemm.cu` (from `ggml/src/ggml-cuda/mmq-load-tiles.cuh` and `mmq-vec-dot.cuh`), the FlashAttention numerics in
+  `src/attn.cu` (Q and P rounding, the KQ max offset, from `ggml/src/ggml-cuda/fattn-*.cuh`), and the log-prob
+  compression in `tools/q27_ppl.cu`
 - the tokenizer in `src/tokenizer.cpp` (BPE merge loop, `qwen35` pre-tokenizer, special-token split, token
   attributes, EOG set and token pieces, ported from `src/llama-vocab.cpp` and `src/unicode.cpp`)
 - `src/unicode_tables.cpp` (Unicode category and whitespace tables, copied from `src/unicode-data.cpp`)
