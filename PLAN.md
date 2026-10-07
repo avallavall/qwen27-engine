@@ -37,7 +37,7 @@ Research reports with sources are in `research/`. Measurement tools are in `benc
 of production on port 8080) serves text, tools and images to Qwen Code, with every milestone check passed. Numbers:
 measurement log, "Engine, final" and "Head-to-head at the same context". After those, the MTP drafts score a
 32k-token subset of the vocabulary (+7% on code, +5% on Spanish). GDN rollback by replay was measured and does not
-pay. M8 (Linux) is postponed by the user.
+pay.
 
 **2026-10-07: second speed round.** The engine was profiled with GPU time stamps inside its CUDA graphs
 (`Q27_PROF=1`), and each bottleneck was changed and measured alone. Main changes: cross-card sums on an int8 wire
@@ -281,7 +281,15 @@ Work estimates are calendar weeks of focused work. They are estimates.
 
 ### M8. Later, optional: Linux build on Ubuntu Server 26.04. (1-2 weeks)
 
-Not scheduled. The user works on Windows for now.
+**Status 2026-10-07: builds and passes every check under WSL2 (Ubuntu 24.04).** `build.sh`, `CMakePresets.json`
+(`win-release`, `linux-release`) and `start-server.sh`. gcc 13.3 needed one change (`setenv` in `test_vision`).
+CUDA 13.4.59 (the same nvcc build as Windows) from NVIDIA's `ubuntu2404` repo, with an apt pin that blocks driver
+packages; the `wsl-ubuntu` repo stops at 13.3. Results in WSL: tokenizer, template and parser tests pass;
+`test_ar`, `test_cache` pass (mapped pinned memory and `cuStreamWaitValue32` work under WSL); logits 4 tokens KLD
+0.00052 / 99.27%, 1 token 0.00067 / 98.92%, 32k prompt 0.00096 / 98.44%, 131k 0.00066 / 99.32% (the same as
+Windows); greedy split at the smallest gap; `bench/test_server.py` ALL PASS; `bench/vision_answers.py` 6/6. Speed in
+WSL (Windows driver underneath, does not count): 23-25 ms per step at 1k. Native Ubuntu (dual boot) is the user's
+decision and is not tested.
 
 
 - Dual boot, driver R615 (open modules), CUDA 13.4 from NVIDIA's `ubuntu2604` repo, persistence mode,

@@ -1,0 +1,36 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "win-release",
+      "displayName": "Windows: MSVC + CUDA 13.4 + Ninja (run tools\\env.bat first, or use build.bat)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_COMPILER": "$env{CUDA_PATH}/bin/nvcc.exe",
+        "CMAKE_CUDA_ARCHITECTURES": "120a-real",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux: gcc + CUDA 13.4 + Ninja",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_COMPILER": "/usr/local/cuda-13.4/bin/nvcc",
+        "CMAKE_CUDA_ARCHITECTURES": "120a-real"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "win-release", "configurePreset": "win-release" },
+    { "name": "linux-release", "configurePreset": "linux-release" }
+  ]
+}

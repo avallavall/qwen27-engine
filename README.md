@@ -105,13 +105,14 @@ full measurement log are in [PLAN.md](PLAN.md).
 
 ## Requirements
 
-- Windows 10/11, x64.
+- Windows 10/11, x64, or Linux x64 (tested under WSL2 with Ubuntu 24.04; see [Limits](#limits)).
 - Two NVIDIA GeForce RTX 50-series cards with 16 GB each (tested: 2x RTX 5060 Ti 16 GB). The code targets sm_120
   (`120a`) and splits the model over exactly two cards.
 - An NVIDIA driver for CUDA 13.4, and the **CUDA Toolkit 13.4**. CUDA 13.2 miscompiles IQ3_S on sm_120 (llama.cpp
   PR #27902), so the build refuses anything older than 13.4.
-- Visual Studio 2022 (the free Build Tools are enough) with "Desktop development with C++" and "C++ CMake tools
-  for Windows" (CMake 3.28 or newer, Ninja).
+- Windows: Visual Studio 2022 (the free Build Tools are enough) with "Desktop development with C++" and "C++ CMake
+  tools for Windows" (CMake 3.28 or newer, Ninja).
+- Linux: gcc 13 or newer, CMake 3.28 or newer, Ninja.
 - 32 GB of system RAM. The prompt cache keeps up to 8 GB of conversation state in RAM by default.
 - Python 3.12, only for the tests and benchmarks.
 
@@ -140,6 +141,21 @@ build.bat
 If they are elsewhere, set `Q27_CUDA` to the CUDA 13.4 folder or `Q27_VCVARS` to `vcvarsall.bat`. The output goes
 to `build\`: the server `q27_server.exe`, the tests and the benchmark tools. `build.bat --target q27_server`
 builds only the server.
+
+On Linux, with CUDA 13.4 in `/usr/local/cuda-13.4`:
+
+```
+./build.sh
+```
+
+`Q27_CUDA` points to another CUDA 13.4 folder and `Q27_BUILD_DIR` to another build folder. The output goes to
+`build/`, with the same program names (no `.exe`). CMake presets exist for both systems: `cmake --preset
+linux-release` (or `win-release` after `tools\env.bat`), then `cmake --build build`.
+
+Under WSL2, install only the CUDA toolkit, never a Linux driver: WSL uses the Windows driver. On 2026-10-07 NVIDIA's
+`wsl-ubuntu` apt repository stopped at CUDA 13.3. The `ubuntu2404` repository has 13.4, and since CUDA 13.4 its
+`cuda-toolkit-13-4` package no longer pulls a driver. Add an apt pin with priority -1 for `nvidia-*`,
+`libnvidia-*` and `cuda-drivers*` to be safe.
 
 ## Run
 
@@ -170,6 +186,10 @@ start `build\q27_server.exe` (the test tools read it too).
 `arranca-q27.ps1` replaces a `llama-server` on port 8080: it listens on all interfaces, reads the API key that
 Qwen Code sends from `~\.qwen\.env` (`QWEN_LOCAL_API_KEY`), asks before it stops a running `llama-server`, and
 checks that the new server answers.
+
+On Linux, `./start-server.sh --api-key <key>` does the same. It takes the same options in lower case (`--port`,
+`--bind`, `--ctx`, `--effort`, `--kv f16`, `--model`, `--mmproj`, `--no-vision`, `--log-dir`). Options after `--`
+go to `q27_server` unchanged, for example `-- --cache-ram 4096`.
 
 `build\q27_server.exe --help` lists the server options: `--temp`, `--top-p`, `--top-k`, `--min-p`,
 `--chat-template-kwargs JSON`, `--cache-ram MB`, `--image-min-tokens` (default 1024), `--image-max-tokens` (4096),
@@ -233,6 +253,8 @@ in the variable named by `envKey`). To let Qwen Code choose the reasoning effort
 | Speed, A/B of settings | `python bench\ab.py 2 "a=Q27_X=0" "b=Q27_X=1"` |
 | Time per kernel group | `set Q27_PROF=1`, then `build\q27_gen.exe ... sample` |
 
+On Linux the tools have the same names in `build/`. The commands above are the Windows form.
+
 The Python scripts use a virtual environment with `jinja2`, `numpy`, `pillow` and `gguf`. The comparisons with
 llama.cpp link a llama.cpp build (`Q27_LLAMA_BIN`) and its source headers (`Q27_LLAMA_SRC`); see `tools\env.bat`.
 
@@ -251,7 +273,9 @@ llama.cpp link a llama.cpp build (`Q27_LLAMA_BIN`) and its source headers (`Q27_
 
 ## Limits
 
-- One model file and Windows only. A Linux build is planned but not done.
+- One model file.
+- Linux is tested only under WSL2 (Ubuntu 24.04, 2026-10-07). All tests pass there, and the logits are the same as on
+  Windows. WSL runs on the Windows driver, so its speed is not a Linux number. A native Linux install is not tested.
 - Exactly two cards. The split over the cards is fixed.
 - One request computes at a time; others wait in a queue.
 - No logprobs, grammars, JSON schema output or repetition penalties. `top_k` is at most 20.

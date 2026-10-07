@@ -618,7 +618,11 @@ static int run_dump(VisionEncoder& enc, const std::string& image, const std::str
 }
 
 int main(int argc, char** argv) try {
+#ifdef _WIN32
   _putenv_s("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
+#else
+  setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 1);
+#endif
   if (argc < 3) {
     fprintf(stderr, "usage: test_vision <mmproj.gguf> unit|compare|bench|dump ... [--dev N]\n");
     return 1;
