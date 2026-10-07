@@ -38,6 +38,7 @@ add_library(q27core STATIC
   src/sampling.cu
   src/vision.cu
   src/vision_img.cpp
+  src/requant.cpp
 )
 target_include_directories(q27core PUBLIC src)
 target_compile_options(q27core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${Q27_CUDA_FLAGS}>)
@@ -132,3 +133,10 @@ target_link_libraries(bench_link2 PRIVATE q27core)
 add_executable(bench_gdnp tools/bench_gdnp.cu)
 target_compile_options(bench_gdnp PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${Q27_CUDA_FLAGS}>)
 target_link_libraries(bench_gdnp PRIVATE q27core)
+
+add_executable(test_requant tools/test_requant.cpp src/requant.cpp)
+target_link_libraries(test_requant PRIVATE q27text)
+
+add_executable(test_accept tools/test_accept.cu)
+target_compile_options(test_accept PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:${Q27_CUDA_FLAGS}>)
+target_include_directories(test_accept PRIVATE src)

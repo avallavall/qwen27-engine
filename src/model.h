@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -98,6 +99,11 @@ class Model {
 
  private:
   void load_shard(Shard& sh, int tp);
+  // Load-time replacements of GGUF tensors (the MTP layer re-quantized, Q27_MTP_TYPE); empty after the constructor.
+  // mtp_job_ fills them on a CPU thread while the cards load the main layers; load_shard waits before the MTP layer.
+  std::map<std::string, GTensor> over_;
+  std::vector<std::vector<uint8_t>> over_bufs_;
+  std::future<void> mtp_job_;
 };
 
 // Decode state for one sequence: KV caches and GDN states on each card, scratch, CUDA graphs per card.

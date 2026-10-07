@@ -180,7 +180,7 @@ int main(int argc, char** argv) try {
     CK(cudaMalloc(&dids, sizeof(int) * K));
     CK(cudaMalloc(&emb, sizeof(float) * (size_t)K * E));
     CK(cudaMemcpy(dids, toks.data() + S, sizeof(int) * K, cudaMemcpyHostToDevice));
-    get_rows_iq2_s(model.tok_embd, model.tok_embd_row_bytes, dids, K, emb, E, 0);
+    get_rows_iq2_s(model.shards[1].embd, model.tok_embd_row_bytes, dids, K, emb, E, 0);
     CK(cudaDeviceSynchronize());
     dec.set_image(emb, K, model.shards[1].dev);
     std::vector<int> mixed = toks;

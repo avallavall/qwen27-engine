@@ -7,14 +7,17 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <numeric>
 
+#include "accept.cuh"
 #include "common.cuh"
 #include "ops.h"
 #include "prefill.h"
 #include "prof.h"
+#include "requant.h"
 #include "sampling.h"
 
 namespace q27 {
@@ -27,6 +30,7 @@ void append(std::vector<int>& v, const std::vector<int>& w) { v.insert(v.end(), 
 struct Loader {
   const GGUF& g;
   Shard& sh;
+  const std::map<std::string, GTensor>* over = nullptr;  // replacement tensors by name
   void* scratch = nullptr;
   size_t scratch_bytes = 0;
   cudaStream_t s = nullptr;
@@ -58,7 +62,8 @@ struct Loader {
     return (__nv_bfloat16*)dev_copy(h.data(), h.size() * 2);
   }
   QMat q(const std::string& name, const std::vector<int>& rows = {}, const std::vector<int>& blocks = {}) {
-    const GTensor& t = g.tensor(name);
+    const auto it = over ? over->find(name) : std::map<std::string, GTensor>::const_iterator{};
+    const GTensor& t = over && it != over->end() ? it->second : g.tensor(name);
     QMat m = qmat_upload_shard(t, rows.empty() ? range(0, (int)t.ne[1]) : rows, blocks, scratch, scratch_bytes, s);
     sh.vram_bytes += m.bytes;
     return m;
@@ -104,6 +109,29 @@ Model::Model(const std::string& path, const std::vector<int>& devices) {
     memcpy(tok_embd, te.data, te.nbytes);
   }
 
+  // MTP layer (blk.64, Q6_K in the file) in a smaller type, Q4_K by default (Q27_MTP_TYPE=q4_k|iq4_xs|q6_k; q6_k = as
+  // in the file). Only the drafts read it, so this changes which tokens get proposed, never the output distribution.
+  // It runs on a CPU thread while the cards load the main layers.
+  {
+    const char* e = getenv("Q27_MTP_TYPE");
+    const GType to = parse_gtype(e ? e : "q4_k");
+    if (to != GType::Q6_K) mtp_job_ = std::async(std::launch::async, [this, to] {
+      const GGUF& g = *g_;
+      const auto t0 = std::chrono::steady_clock::now();
+      for (const char* n : {"ffn_gate", "ffn_up", "ffn_down", "attn_q", "attn_k", "attn_v", "attn_output", "nextn.eh_proj"}) {
+        const GTensor& t = g.tensor(std::string("blk.64.") + n + ".weight");
+        over_bufs_.push_back(requant(t, to));
+        GTensor r = t;
+        r.type = to;
+        r.data = over_bufs_.back().data();
+        r.nbytes = over_bufs_.back().size();
+        over_[t.name] = r;
+      }
+      const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      fprintf(stderr, "MTP layer re-quantized to %s in %.1f s (on a CPU thread)\n", gtype_name(to), s);
+    });
+  }
+
   const int tp = (int)devices.size();
   shards.resize(tp);
   for (int r = 0; r < tp; r++) {
@@ -111,6 +139,9 @@ Model::Model(const std::string& path, const std::vector<int>& devices) {
     shards[r].rank = r;
     load_shard(shards[r], tp);
   }
+  over_.clear();
+  over_bufs_.clear();
+  over_bufs_.shrink_to_fit();
   // Q27_DRAFT_VOCAB=<file>[:n] (tools): draft vocabulary from a ranked id file (see set_draft_vocab_file)
   if (const char* e = getenv("Q27_DRAFT_VOCAB")) {
     std::string v = e;
@@ -201,6 +232,8 @@ void Model::load_shard(Shard& sh, int tp) {
   }
   sh.output_norm = L.f32("output_norm.weight", E);
   sh.output = L.q("output.weight", range(sh.vocab0, sh.vocab_n));
+  if (mtp_job_.valid()) mtp_job_.get();  // the re-quantized MTP layer (rethrows its errors)
+  L.over = &over_;
   {
     Layer& M = sh.mtp;
     const std::string p = "blk.64.";
@@ -299,25 +332,6 @@ namespace {
 // Mirror of Decoder::DState: P, s, d[3], n_emit, emit[4], counter.
 struct St { int P, s, d[3], n_emit, emit[4], counter; };
 
-__device__ __forceinline__ float rng01(uint64_t seed, int counter, int row, int salt) {
-  uint64_t z = seed ^ ((uint64_t)(uint32_t)counter << 24) ^ ((uint64_t)row << 8) ^ (uint64_t)salt;
-  z += 0x9e3779b97f4a7c15ull;
-  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
-  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
-  z ^= z >> 31;
-  return (float)((z >> 40) * (1.0 / 16777216.0));
-}
-
-__device__ float cand_p(const CandRow& c, int id) {
-  for (int i = 0; i < c.n; i++) if (c.id[i] == id) return c.p[i];
-  return 0.f;
-}
-__device__ int cand_draw(const CandRow& c, float u) {
-  float cum = 0.f;
-  for (int i = 0; i < c.n; i++) { cum += c.p[i]; if (u < cum) return c.id[i]; }
-  return c.n > 0 ? c.id[c.n - 1] : 0;
-}
-
 // MTP input rows: hrows[0] = pend_h (hidden of the token before the pass), hrows[t] = hfin[t-1];
 // then pend_h = hfin[last], where last = n_emit-1 after a verify (st != null) or T-1 for a prompt pass.
 __global__ void k_rows(float* hrows, float* pend_h, const float* hfin, int T, int E, const St* st) {
@@ -348,37 +362,19 @@ __global__ void k_prep_verify(St* st, int* dtok, int* dpos) {
   dtok[0] = st->s; dtok[1] = st->d[0]; dtok[2] = st->d[1]; dtok[3] = st->d[2];
   *dpos = st->P;
 }
-// llama.cpp rule (common/sampling.cpp, PR #27694): accept draft x if q(x) > 0 and (p(x) >= q(x) or
-// U < p(x)/q(x)); on reject draw from max(0, p - q) (tokens outside q keep p); after 3 accepts draw
-// a bonus token from row 3.
-__global__ void k_accept(St* st, const CandRow* pc, const CandRow* qc, uint64_t seed, int* dplane, int* host_emit) {
+// Q27_ACCEPT=token: llama.cpp's token-by-token acceptance rule; default: block verification.
+bool accept_block_on() {
+  static const bool v = [] { const char* e = getenv("Q27_ACCEPT"); return !(e && strcmp(e, "token") == 0); }();
+  return v;
+}
+// Acceptance of the 3 drafts (src/accept.cuh): block verification (Sun et al., ICLR 2025) or, with
+// Q27_ACCEPT=token, llama.cpp's token-by-token rule. Both keep the target distribution exactly.
+__global__ void k_accept(St* st, const CandRow* pc, const CandRow* qc, uint64_t seed, int* dplane, int* host_emit,
+                         int block) {
   pdl_wait();
   pdl_trigger();
-  int cnt = 0;
-  bool rejected = false;
-  for (int i = 0; i < 3 && !rejected; i++) {
-    const int x = st->d[i];
-    const float px = cand_p(pc[i], x), qx = cand_p(qc[i], x);
-    const float u = rng01(seed, st->counter, i, 1);
-    if (qx > 0.f && (px >= qx || u < px / qx)) { st->emit[cnt++] = x; continue; }
-    float sum = 0.f;
-    for (int k = 0; k < pc[i].n; k++) sum += fmaxf(0.f, pc[i].p[k] - cand_p(qc[i], pc[i].id[k]));
-    int pick;
-    if (sum > 0.f) {
-      const float u2 = rng01(seed, st->counter, i, 2) * sum;
-      float cum = 0.f;
-      pick = pc[i].n > 0 ? pc[i].id[pc[i].n - 1] : 0;
-      for (int k = 0; k < pc[i].n; k++) {
-        cum += fmaxf(0.f, pc[i].p[k] - cand_p(qc[i], pc[i].id[k]));
-        if (u2 < cum) { pick = pc[i].id[k]; break; }
-      }
-    } else {
-      pick = cand_draw(pc[i], rng01(seed, st->counter, i, 3));
-    }
-    st->emit[cnt++] = pick;
-    rejected = true;
-  }
-  if (!rejected) st->emit[cnt++] = cand_draw(pc[3], rng01(seed, st->counter, 3, 4));
+  const int cnt = block ? accept_block(st->d, 3, pc, qc, seed, st->counter, st->emit)
+                        : accept_token(st->d, 3, pc, qc, seed, st->counter, st->emit);
   st->n_emit = cnt;
   *dplane = cnt - 1;
   if (host_emit) {
@@ -830,7 +826,7 @@ void Decoder::enqueue(int ri, Kind kind, bool with_sums) {
       ph_ = "S.";
       candidates(ri, R.logits, 4, false, R.pc, ix, with_sums);
       mk(ri, "cand");
-      launch_k(k_accept, 1, 1, 0, s, st, R.pc, R.qc, sp_.seed, R.dplane, host_emit);
+      launch_k(k_accept, 1, 1, 0, s, st, R.pc, R.qc, sp_.seed, R.dplane, host_emit, (int)accept_block_on());
       launch_k(k_rows, (E + 255) / 256, 256, 0, s, R.hrows, R.pend_h, R.hfin, 4, E, st);
       mk(ri, "accept");
       ph_ = "C.";
