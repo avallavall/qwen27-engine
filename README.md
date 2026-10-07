@@ -1,7 +1,7 @@
 # qwen27-engine
 
 An inference engine written from scratch for one model, **Qwen3.8-27B**, on one kind of machine, **two NVIDIA RTX
-5060 Ti 16 GB cards** (Blackwell, sm_120) under Windows. It serves an OpenAI-compatible API with streaming, tool
+5060 Ti 16 GB cards** (Blackwell, sm_120) under Windows (a Linux build is tested under WSL2). It serves an OpenAI-compatible API with streaming, tool
 calls, reasoning, image input and speculative decoding. Coding agents such as Qwen Code use it in place of
 `llama-server`.
 
@@ -82,15 +82,16 @@ flowchart LR
     E --> G0["GPU 0<br/>half of every layer"]
     E --> G1["GPU 1<br/>half of every layer<br/>+ vision encoder"]
     G0 <-- "partial sums<br/>via pinned host memory" --> G1
-    E <--> R[("Host RAM<br/>embeddings, checkpoints,<br/>swapped conversations")]
+    E <--> R[("Host RAM<br/>checkpoints,<br/>swapped conversations")]
 ```
 
 - **Two cards, one token at a time.** Each card holds half of every layer (tensor parallelism). The cards add
   their partial results twice per layer through pinned host memory, because GeForce cards on Windows have no
   peer-to-peer link. The sums travel as int8 with error feedback, 44% fewer bytes than bf16.
-- **Speculative decoding on the GPU.** The model's own MTP head drafts 3 tokens. One 4-token pass verifies them.
-  Sampling and the acceptance test run on the GPU, and each step is one CUDA graph per card. A step emits about 3
-  tokens.
+- **Speculative decoding on the GPU.** The model's own MTP head (re-quantized to Q4_K at load, so drafting is
+  cheaper) drafts 3 tokens. One 4-token pass verifies them with block verification, an exact rule that accepts at
+  least as many drafts as the usual token-by-token rule. Sampling and the acceptance test run on the GPU, and each
+  step is one CUDA graph per card. A step emits about 3 tokens.
 - **Own kernels for the model's quant types.** Decode GEMVs read the 10 quantization types of the GGUF at 85-90%
   of the memory bandwidth. Prompt GEMMs and prompt attention use int8 tensor cores.
 - **Prompt reading in batches of 2048 tokens.** Each batch is split in two halves, so the link traffic of one

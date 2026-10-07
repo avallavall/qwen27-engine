@@ -120,7 +120,7 @@ Model::Model(const std::string& path, const std::vector<int>& devices) {
       const auto t0 = std::chrono::steady_clock::now();
       for (const char* n : {"ffn_gate", "ffn_up", "ffn_down", "attn_q", "attn_k", "attn_v", "attn_output", "nextn.eh_proj"}) {
         const GTensor& t = g.tensor(std::string("blk.64.") + n + ".weight");
-        over_bufs_.push_back(requant(t, to));
+        over_bufs_.push_back(requant(t, to, std::max(1, (int)std::thread::hardware_concurrency() / 2)));  // half: leaves CPU to the loader
         GTensor r = t;
         r.type = to;
         r.data = over_bufs_.back().data();
@@ -139,6 +139,8 @@ Model::Model(const std::string& path, const std::vector<int>& devices) {
     shards[r].rank = r;
     load_shard(shards[r], tp);
   }
+  if (mtp_job_.valid()) mtp_job_.get();  // the re-quantized MTP layer (rethrows its errors)
+  for (int r = 0; r < tp; r++) load_mtp(shards[r], tp);
   over_.clear();
   over_bufs_.clear();
   over_bufs_.shrink_to_fit();
@@ -232,28 +234,49 @@ void Model::load_shard(Shard& sh, int tp) {
   }
   sh.output_norm = L.f32("output_norm.weight", E);
   sh.output = L.q("output.weight", range(sh.vocab0, sh.vocab_n));
-  if (mtp_job_.valid()) mtp_job_.get();  // the re-quantized MTP layer (rethrows its errors)
-  L.over = &over_;
-  {
-    Layer& M = sh.mtp;
-    const std::string p = "blk.64.";
-    M.attn = true;
-    M.attn_norm = L.f32(p + "attn_norm.weight", E);
-    M.post_norm = L.f32(p + "post_attention_norm.weight", E);
-    M.ffn_gate = L.q(p + "ffn_gate.weight", ff_rows);
-    M.ffn_up = L.q(p + "ffn_up.weight", ff_rows);
-    M.ffn_down = L.q(p + "ffn_down.weight", {}, down_blocks);
-    M.wq = L.q(p + "attn_q.weight", q_rows);
-    M.wk = L.q(p + "attn_k.weight", kv_rows);
-    M.wv = L.q(p + "attn_v.weight", kv_rows);
-    M.wo = L.q(p + "attn_output.weight", {}, o_blocks);
-    M.q_norm = L.f32(p + "attn_q_norm.weight", hp.head_dim);
-    M.k_norm = L.f32(p + "attn_k_norm.weight", hp.head_dim);
-    sh.eh_proj = L.q(p + "nextn.eh_proj.weight");
-    sh.enorm = L.f32(p + "nextn.enorm.weight", E);
-    sh.hnorm = L.f32(p + "nextn.hnorm.weight", E);
-    sh.shared_head_norm = L.f32(p + "nextn.shared_head_norm.weight", E);
+  CK(cudaFree(L.scratch));
+  CK(cudaStreamDestroy(L.s));
+}
+
+// The MTP block (blk.64), split like a target attention layer; eh_proj whole on every card. Loaded after the main
+// layers of both cards, so the re-quantization on the CPU thread has the whole main load to finish.
+void Model::load_mtp(Shard& sh, int tp) {
+  CK(cudaSetDevice(sh.dev));
+  const int r = sh.rank;
+  const Hparams& hp = hp_;
+  const int E = hp.n_embd;
+  const std::vector<int> q_rows = range(r * sh.qh * 2 * hp.head_dim, sh.qh * 2 * hp.head_dim);
+  const std::vector<int> kv_rows = range(r * sh.kvh * hp.head_dim, sh.kvh * hp.head_dim);
+  const std::vector<int> o_blocks = range(r * sh.qh * hp.head_dim / 256, sh.qh * hp.head_dim / 256);
+  const std::vector<int> ff_rows = range(r * sh.ff, sh.ff);
+  const std::vector<int> down_blocks = range(r * sh.ff / 256, sh.ff / 256);
+  (void)tp;
+  Loader L{*g_, sh, &over_};
+  CK(cudaStreamCreate(&L.s));
+  const std::string p = "blk.64.";
+  for (const char* n : {"ffn_gate", "ffn_up", "ffn_down", "attn_q", "attn_k", "attn_v", "attn_output", "nextn.eh_proj"}) {
+    const std::string name = p + n + ".weight";
+    const auto it = over_.find(name);
+    L.scratch_bytes = std::max(L.scratch_bytes, (size_t)(it != over_.end() ? it->second.nbytes : g_->tensor(name).nbytes));
   }
+  CK(cudaMalloc(&L.scratch, L.scratch_bytes));
+  Layer& M = sh.mtp;
+  M.attn = true;
+  M.attn_norm = L.f32(p + "attn_norm.weight", E);
+  M.post_norm = L.f32(p + "post_attention_norm.weight", E);
+  M.ffn_gate = L.q(p + "ffn_gate.weight", ff_rows);
+  M.ffn_up = L.q(p + "ffn_up.weight", ff_rows);
+  M.ffn_down = L.q(p + "ffn_down.weight", {}, down_blocks);
+  M.wq = L.q(p + "attn_q.weight", q_rows);
+  M.wk = L.q(p + "attn_k.weight", kv_rows);
+  M.wv = L.q(p + "attn_v.weight", kv_rows);
+  M.wo = L.q(p + "attn_output.weight", {}, o_blocks);
+  M.q_norm = L.f32(p + "attn_q_norm.weight", hp.head_dim);
+  M.k_norm = L.f32(p + "attn_k_norm.weight", hp.head_dim);
+  sh.eh_proj = L.q(p + "nextn.eh_proj.weight");
+  sh.enorm = L.f32(p + "nextn.enorm.weight", E);
+  sh.hnorm = L.f32(p + "nextn.hnorm.weight", E);
+  sh.shared_head_norm = L.f32(p + "nextn.shared_head_norm.weight", E);
   CK(cudaFree(L.scratch));
   CK(cudaStreamDestroy(L.s));
 }

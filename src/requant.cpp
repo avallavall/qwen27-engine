@@ -309,7 +309,7 @@ GType parse_gtype(const std::string& s) {
   throw std::runtime_error("unknown quant type " + s + " (q4_k, iq4_xs or q6_k)");
 }
 
-std::vector<uint8_t> requant(const GTensor& t, GType to) {
+std::vector<uint8_t> requant(const GTensor& t, GType to, int threads) {
   if (t.type != GType::Q6_K && t.type != GType::Q4_K) throw std::runtime_error("requant: source " + t.name + " must be Q6_K or Q4_K");
   if (to != GType::Q4_K && to != GType::IQ4_XS) throw std::runtime_error("requant: target must be Q4_K or IQ4_XS");
   const int64_t K = t.ne[0], nb = K / QK, rows = t.rows();
@@ -325,7 +325,7 @@ std::vector<uint8_t> requant(const GTensor& t, GType to) {
         if (to == GType::Q4_K) q_q4_k(x, dst); else q_iq4_xs(x, dst);
       }
   };
-  const int nt = (int)std::max(1u, std::min(32u, std::thread::hardware_concurrency()));
+  const int nt = threads > 0 ? threads : (int)std::max(1u, std::min(32u, std::thread::hardware_concurrency()));
   std::vector<std::thread> th;
   for (int i = 0; i < nt; i++) th.emplace_back(work, rows * i / nt, rows * (i + 1) / nt);
   for (auto& x : th) x.join();

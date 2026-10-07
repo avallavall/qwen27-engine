@@ -99,8 +99,9 @@ class Model {
 
  private:
   void load_shard(Shard& sh, int tp);
+  void load_mtp(Shard& sh, int tp);  // the MTP block, after all main layers (so the re-quantization has time)
   // Load-time replacements of GGUF tensors (the MTP layer re-quantized, Q27_MTP_TYPE); empty after the constructor.
-  // mtp_job_ fills them on a CPU thread while the cards load the main layers; load_shard waits before the MTP layer.
+  // mtp_job_ fills them on a CPU thread while the cards load the main layers; load_mtp waits for it.
   std::map<std::string, GTensor> over_;
   std::vector<std::vector<uint8_t>> over_bufs_;
   std::future<void> mtp_job_;

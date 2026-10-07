@@ -11,7 +11,7 @@
 namespace q27 {
 
 // All rows of t (Q6_K or Q4_K) in type `to` (Q4_K or IQ4_XS), GGUF block layout. Throws for other types.
-std::vector<uint8_t> requant(const GTensor& t, GType to);
+std::vector<uint8_t> requant(const GTensor& t, GType to, int threads = 0);  // threads 0 = all hardware threads
 // Parses "q4_k" / "iq4_xs" / "q6_k" (any case). Throws for other names.
 GType parse_gtype(const std::string& s);
 
